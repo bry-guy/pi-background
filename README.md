@@ -35,7 +35,7 @@ The footer shows `bg: N running`. You get a notification when a run finishes.
 - Background runs stop on sleep or shutdown. pi-keepalive prevents idle sleep only.
 - A plain `pi` without this extension ignores the lock. With it, a pi that opens a session another process is writing (e.g. `pi -c`) refuses to send until you `/resume` it.
 - Projects whose project-local resources aren't trusted run without them; the runner can't show the trust prompt.
-- pi-sync: background turns are pushed (tested), but pi-sync never auto-enrolls a session from a background run (it needs `hasUI`). A session that's already synced works. pi-sync could still drop a prompt silently if another process holds the lease; that case isn't tested.
+- pi-sync: background turns hold the conversation's lease and are pushed when they finish. Enrolling background-only sessions, and not releasing a running turn's lease from another local pi, need pi-sync with the `bg-enroll-lease` fix. If another device holds the lease, the run ends as an error.
 
 ## Test
 
