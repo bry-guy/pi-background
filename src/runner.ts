@@ -95,11 +95,30 @@ try {
 			modelRuntimeSignal: AbortSignal.timeout(15_000),
 			resourceLoaderOptions: { extensionFactories: builtInExtensions },
 		});
-		for (const e of services.resourceLoader.getExtensions().errors) log_("extension failed:", e.path, e.error);
+		const ext = services.resourceLoader.getExtensions();
+		log_("extensions:", ext.extensions.map((e: { path: string }) => e.path.split("/node_modules/").at(-1)).join(", "));
+		for (const e of ext.errors) log_("extension failed:", e.path, e.error);
+		// Mirror main.js buildSessionOptions: enabledModels scope the model, and a new session starts on
+		// the saved default if it's in scope, else the first scoped model. Existing sessions restore their own.
+		const patterns: string[] | undefined = settingsManager.getEnabledModels();
+		const scoped: { model: any; thinkingLevel?: string }[] = patterns?.length
+			? (await pi.resolveModelScopeWithDiagnostics(patterns, services.modelRuntime, { signal: AbortSignal.timeout(15_000) })).scopedModels
+			: [];
+		const sm = o.sessionManager as { buildSessionContext(): { messages: unknown[] } };
+		let pick: (typeof scoped)[number] | undefined;
+		if (scoped.length && sm.buildSessionContext().messages.length === 0) {
+			const p = settingsManager.getDefaultProvider();
+			const id = settingsManager.getDefaultModel();
+			const saved = p && id ? services.modelRuntime.getModel(p, id) : undefined;
+			pick = scoped.find((x) => saved && x.model.provider === saved.provider && x.model.id === saved.id) ?? scoped[0];
+		}
 		const created = await pi.createAgentSessionFromServices({
 			services,
 			sessionManager: o.sessionManager,
 			sessionStartEvent: o.sessionStartEvent,
+			model: pick?.model,
+			thinkingLevel: pick?.thinkingLevel,
+			scopedModels: scoped.length ? scoped : undefined,
 		});
 		return { ...created, services, diagnostics: [] };
 	};
