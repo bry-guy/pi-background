@@ -34,7 +34,6 @@ The footer shows `bg: N running`. You get a notification when a run finishes.
 - A turn that's running can't move between processes. Moving or stopping one loses only the step that was in flight; the next turn starts with `continue`.
 - Background runs stop on sleep or shutdown. pi-keepalive prevents idle sleep only.
 - A plain `pi` without this extension ignores the lock. With it, a pi that opens a session another process is writing (e.g. `pi -c`) refuses to send until you `/resume` it.
-- "Wait for its turn to end" can't be cancelled; it gives up after 30 minutes.
 - Projects whose project-local resources aren't trusted run without them; the runner can't show the trust prompt.
 - pi-sync: background turns are pushed (tested), but pi-sync never auto-enrolls a session from a background run (it needs `hasUI`). A session that's already synced works. pi-sync could still drop a prompt silently if another process holds the lease; that case isn't tested.
 

@@ -8,7 +8,6 @@ import { listRuns, type Run } from "./registry.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
 const STATUS = "pi-background";
-const WAIT_MS = 30 * 60 * 1000;
 
 const runsDir = () => join(getAgentDir(), "background");
 const label = (r: Run) => `${r.name}  ${r.status}  ${r.startedAt.slice(11, 16)}  "${r.msg.slice(0, 50)}"`;
@@ -129,10 +128,17 @@ export default function (pi: ExtensionAPI) {
 				} catch {} // already gone: waitFree returns at once
 				pendingContinue = target;
 			}
-			ctx.ui.notify("Waiting for the background turn to end…", "info");
-			if (!(await waitFree(target, WAIT_MS))) {
+			// Wait with a dialog the user can dismiss at any time; it closes itself when the run frees the session.
+			const done = new AbortController();
+			// Cancel or Escape resolves the dialog, which stops the wait. Resolving after we abort it is harmless.
+			void ctx.ui
+				.select(`Waiting for the background turn on ${basename(target)} to end…`, ["Cancel"], { signal: done.signal })
+				.then(() => done.abort());
+			const free = await waitFree(target, Infinity, done.signal);
+			done.abort();
+			if (!free) {
 				pendingContinue = undefined;
-				ctx.ui.notify("Still running; switch cancelled.", "warning");
+				ctx.ui.notify("Stopped waiting; still running in the background.", "info");
 				return { cancel: true };
 			}
 		}

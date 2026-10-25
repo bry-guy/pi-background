@@ -75,11 +75,11 @@ export function release(file: string): void {
 	}
 }
 
-/** Poll until nobody holds the lock. Resolves false on timeout. */
-export async function waitFree(file: string, timeoutMs: number): Promise<boolean> {
+/** Poll until nobody holds the lock. Resolves false on timeout or abort. */
+export async function waitFree(file: string, timeoutMs = Infinity, signal?: AbortSignal): Promise<boolean> {
 	const end = Date.now() + timeoutMs;
 	while (holder(file)) {
-		if (Date.now() > end) return false;
+		if (Date.now() > end || signal?.aborted) return false;
 		await new Promise((r) => setTimeout(r, 300));
 	}
 	return true;
