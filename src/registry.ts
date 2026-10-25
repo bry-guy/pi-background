@@ -10,7 +10,7 @@ export type Run = {
 	msg: string;
 	log: string;
 	startedAt: string;
-	status: "running" | "done" | "error" | "stopped" | "died";
+	status: "waiting" | "running" | "done" | "error" | "stopped" | "died";
 	endedAt?: string;
 	error?: string;
 };
@@ -34,7 +34,7 @@ export function listRuns(dir: string): Run[] {
 	for (const n of names) {
 		try {
 			const r: Run = JSON.parse(readFileSync(join(dir, n), "utf8"));
-			if (r.status === "running" && !alive(r.pid)) r.status = "died";
+			if ((r.status === "running" || r.status === "waiting") && !alive(r.pid)) r.status = "died";
 			const ended = r.endedAt ? Date.parse(r.endedAt) : r.status === "died" ? Date.parse(r.startedAt) : undefined;
 			if (ended && Date.now() - ended > DAY) {
 				rmSync(join(dir, n), { force: true });

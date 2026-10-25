@@ -37,16 +37,17 @@ const run: Run = {
 };
 const log_ = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 
+// Record the run first so a runner stuck behind the lock still shows up in /bg list.
+writeRun(dir, { ...run, status: "waiting" });
+const giveUp = (error: string) => {
+	log_(error);
+	writeRun(dir, { ...run, status: "error", error, endedAt: new Date().toISOString() });
+	process.exit(1);
+};
 // The TUI releases its lock only after its own turn is aborted and saved, so wait for it.
-if (!(await waitFree(file, 120_000))) {
-	log_("session is still locked; giving up");
-	process.exit(1);
-}
+if (!(await waitFree(file, 120_000))) giveUp("session stayed locked for 2 minutes; gave up");
 const got = acquire(file, "bg");
-if (!got.ok) {
-	log_("lock taken by", got.heldBy);
-	process.exit(1);
-}
+if (!got.ok) giveUp(`session locked by pid ${got.heldBy.pid} (${got.heldBy.role})`);
 writeRun(dir, run);
 
 let runtime: { session: any; dispose(): Promise<void> } | undefined;

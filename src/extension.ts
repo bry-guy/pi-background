@@ -41,11 +41,11 @@ export default function (pi: ExtensionAPI) {
 
 	const poll = () => {
 		const runs = listRuns(runsDir());
-		const running = runs.filter((r) => r.status === "running").length;
+		const running = runs.filter((r) => r.status === "running" || r.status === "waiting").length;
 		ui?.ui.setStatus(STATUS, running ? `bg: ${running} running` : undefined);
 		for (const r of runs) {
 			const key = `${r.pid}:${r.startedAt}`;
-			if (r.status === "running" || notified.has(key)) continue;
+			if (r.status === "running" || r.status === "waiting" || notified.has(key)) continue;
 			notified.add(key);
 			if (primed) ui?.ui.notify(`bg: ${r.name} ${r.status}${r.error ? `: ${r.error}` : ""}`, r.status === "done" ? "info" : "warning");
 		}
@@ -154,17 +154,17 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("bg", {
 		description: "Background sessions: /bg <message> | /bg list | /bg stop",
-		getArgumentCompletions: (prefix: string) =>
-			["list", "stop"].filter((k) => k.startsWith(prefix)).map((k) => ({ value: k, label: k })),
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			const runs = listRuns(runsDir());
+			if (/^(list|stop)\b/.test(arg) && arg !== "list" && arg !== "stop")
+				return ctx.ui.notify(`Unknown: /bg ${arg}. Use /bg list, /bg stop, or /bg <message>.`, "warning");
 			if (arg === "list") {
 				ctx.ui.notify(runs.length ? runs.map(label).join("\n") : "No background runs.", "info");
 				return;
 			}
 			if (arg === "stop") {
-				const running = runs.filter((r) => r.status === "running");
+				const running = runs.filter((r) => r.status === "running" || r.status === "waiting");
 				if (!running.length) return ctx.ui.notify("Nothing running in the background.", "info");
 				const c = await ctx.ui.select("Stop which run?", running.map(label));
 				const r = running.find((x) => label(x) === c);
