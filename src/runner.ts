@@ -109,9 +109,13 @@ try {
 	const session = runtime!.session;
 	await session.bindExtensions({ mode: "print", onError: (e: { extensionPath: string; error: string }) => log_("extension error", e.extensionPath, e.error) });
 	log_("prompting", JSON.stringify(msg), "model", session.model?.id);
+	const before = session.messages.length;
 	await session.prompt(msg);
+	// An extension can swallow the prompt (pi-sync does when another device holds the conversation's lease).
 	const last = session.messages.at(-1);
-	await finish(last?.stopReason === "error" ? "error" : "done", last?.errorMessage);
+	if (session.messages.length === before)
+		await finish("error", "prompt was not sent: an extension refused it (another device may be running this conversation)");
+	else await finish(last?.stopReason === "error" ? "error" : "done", last?.errorMessage);
 } catch (e) {
 	log_("failed", e);
 	await finish("error", String((e as Error)?.message ?? e));
