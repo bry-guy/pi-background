@@ -26,10 +26,19 @@ test("a dead holder's lock is reclaimed", () => {
 test("a live holder blocks; waitFree resolves when it exits", async () => {
 	const f = session();
 	const child = spawn(process.execPath, ["-e", "setTimeout(()=>{},800)"]);
+	await new Promise((r) => setTimeout(r, 100));
 	writeFileSync(lockPath(f), JSON.stringify({ pid: child.pid, host: hostname(), role: "bg", startedAt: "" }));
 	const r = acquire(f, "tui");
 	assert.equal(r.ok, false);
 	assert.equal(!r.ok && r.heldBy.pid, child.pid);
 	assert.equal(await waitFree(f, 50), false);
 	assert.equal(await waitFree(f, 5000), true);
+});
+
+test("a live pid that isn't node/pi doesn't hold the lock", () => {
+	const f = session();
+	const child = spawn("sleep", ["5"]);
+	writeFileSync(lockPath(f), JSON.stringify({ pid: child.pid, host: hostname(), role: "bg", startedAt: "" }));
+	assert.deepEqual(acquire(f, "tui"), { ok: true });
+	child.kill();
 });

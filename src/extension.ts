@@ -35,6 +35,8 @@ let primed = false;
 export default function (pi: ExtensionAPI) {
 	if (process.env.PI_BACKGROUND) return; // the runner locks its own session; don't nest
 	let held: string | undefined;
+	// Session opened while another process was writing it: our in-memory copy may be behind the file.
+	let stale: string | undefined;
 	let ui: ExtensionContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -73,18 +75,39 @@ export default function (pi: ExtensionAPI) {
 		if (!file || held === file || !existsSync(file)) return; // no file yet: nobody else can be writing it
 		const got = acquire(file, "tui");
 		if (got.ok) held = file;
-		else
+		else {
+			stale = file;
 			ctx.ui.notify(
 				got.heldBy.role === "bg"
 					? `This session is running in the background (pid ${got.heldBy.pid}). Switch away, or /bg stop it, before typing here.`
 					: `This session is open in another pi (pid ${got.heldBy.pid}). Writing from both corrupts it.`,
 				"warning",
 			);
+		}
 	}
+
+	// Startup (pi -c, pi --session) fires no session_before_switch, so the only safe gate is before input is accepted.
+	pi.on("input", (_event, ctx) => {
+		const file = ctx.sessionManager.getSessionFile();
+		if (!file || held === file) return { action: "continue" };
+		if (stale !== file) {
+			lock(ctx);
+			if (held === file || !existsSync(file)) return { action: "continue" };
+		}
+		const h = holder(file);
+		ctx.ui.notify(
+			h
+				? `Not sent: pid ${h.pid} (${h.role}) is writing this session. ${h.role === "bg" ? "/bg stop it or wait" : "Close it there"}, then /resume this session.`
+				: "Not sent: this session changed on disk while it was open here. /resume it to load the latest version.",
+			"warning",
+		);
+		return { action: "handled" };
+	});
 
 	pi.on("session_shutdown", () => {
 		if (held) release(held);
 		held = undefined;
+		stale = undefined;
 		clearInterval(timer);
 		ui = undefined; // this ctx goes stale once the session is replaced
 	});

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { linkSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 
@@ -6,12 +7,18 @@ export type Holder = { pid: number; host: string; role: "tui" | "bg"; startedAt:
 
 export const lockPath = (file: string) => `${file}.lock`;
 
+/** True if `pid` is running and is a node/pi process (a reused pid of another program counts as dead). */
 export function alive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
-		return true;
 	} catch (e) {
-		return (e as NodeJS.ErrnoException).code === "EPERM";
+		if ((e as NodeJS.ErrnoException).code !== "EPERM") return false;
+	}
+	try {
+		const comm = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+		return /node|pi/i.test(comm);
+	} catch {
+		return true; // ps missing or failed: trust kill(0)
 	}
 }
 

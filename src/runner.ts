@@ -68,6 +68,7 @@ async function finish(status: Run["status"], error?: string) {
 
 for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
 	process.on(sig, async () => {
+		if (finished) return;
 		log_("got", sig, "- aborting so the partial turn is saved");
 		try {
 			await runtime?.session.abort();
