@@ -1,0 +1,18 @@
+{
+  "name": "@bry-guy/pi-background",
+  "version": "0.1.0",
+  "description": "Run pi sessions in the background on your machine and pick them up with /resume",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "background"],
+  "license": "MIT",
+  "files": ["src", "README.md"],
+  "pi": {
+    "extensions": ["./src/extension.ts"]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
