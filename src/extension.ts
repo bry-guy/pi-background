@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent";
@@ -27,12 +27,15 @@ function spawnRunner(file: string, msg: string, cwd: string): void {
 	}).unref();
 }
 
+// pi re-runs the extension factory on every session switch, so state that must survive a switch lives here.
+let pendingContinue: string | undefined;
+const notified = new Set<string>();
+let primed = false;
+
 export default function (pi: ExtensionAPI) {
 	if (process.env.PI_BACKGROUND) return; // the runner locks its own session; don't nest
 	let held: string | undefined;
-	let pendingContinue: string | undefined;
 	let ui: ExtensionContext | undefined;
-	const notified = new Set<string>();
 	let timer: ReturnType<typeof setInterval> | undefined;
 
 	const poll = () => {
@@ -43,19 +46,31 @@ export default function (pi: ExtensionAPI) {
 			const key = `${r.pid}:${r.startedAt}`;
 			if (r.status === "running" || notified.has(key)) continue;
 			notified.add(key);
-			if (timer) ui?.ui.notify(`bg: ${r.name} ${r.status}${r.error ? `: ${r.error}` : ""}`, r.status === "done" ? "info" : "warning");
+			if (primed) ui?.ui.notify(`bg: ${r.name} ${r.status}${r.error ? `: ${r.error}` : ""}`, r.status === "done" ? "info" : "warning");
 		}
 	};
 
 	pi.on("session_start", (_event, ctx) => {
 		ui = ctx;
-		if (!timer) {
-			poll(); // mark already-finished runs as seen without notifying
-			timer = setInterval(poll, 5000);
-			timer.unref();
-		}
+		poll(); // the first poll in a pi process marks already-finished runs as seen without notifying
+		primed = true;
+		timer = setInterval(poll, 5000);
+		timer.unref();
+		lock(ctx);
 		const file = ctx.sessionManager.getSessionFile();
-		if (!file) return;
+		if (pendingContinue && pendingContinue === file) {
+			pendingContinue = undefined;
+			setTimeout(() => pi.sendUserMessage("continue"), 0); // after the switch finishes
+		}
+	});
+
+	// A new session's file appears only after its first reply, so retry around turns.
+	pi.on("agent_start", (_event, ctx) => lock(ctx));
+	pi.on("agent_end", (_event, ctx) => lock(ctx));
+
+	function lock(ctx: ExtensionContext) {
+		const file = ctx.sessionManager.getSessionFile();
+		if (!file || held === file || !existsSync(file)) return; // no file yet: nobody else can be writing it
 		const got = acquire(file, "tui");
 		if (got.ok) held = file;
 		else
@@ -65,16 +80,13 @@ export default function (pi: ExtensionAPI) {
 					: `This session is open in another pi (pid ${got.heldBy.pid}). Writing from both corrupts it.`,
 				"warning",
 			);
-		if (pendingContinue === file) {
-			pendingContinue = undefined;
-			setTimeout(() => pi.sendUserMessage("continue"), 0); // after the switch finishes
-		}
-	});
+	}
 
-	pi.on("session_shutdown", (event) => {
+	pi.on("session_shutdown", () => {
 		if (held) release(held);
 		held = undefined;
-		if (event.reason === "quit" && timer) clearInterval(timer);
+		clearInterval(timer);
+		ui = undefined; // this ctx goes stale once the session is replaced
 	});
 
 	pi.on("session_before_switch", async (event, ctx) => {
@@ -133,10 +145,13 @@ export default function (pi: ExtensionAPI) {
 			const file = ctx.sessionManager.getSessionFile();
 			if (!file) return ctx.ui.notify("This session isn't saved to a file, so it can't run in the background.", "error");
 			if (!ctx.isIdle()) return ctx.ui.notify("Busy. Switch sessions and pick 'Move it to the background' instead.", "warning");
+			// pi writes a new session's file only after the first reply; the runner needs it to exist.
+			if (!existsSync(file)) writeFileSync(file, `${JSON.stringify(ctx.sessionManager.getHeader())}\n`);
 			spawnRunner(file, arg || "continue", ctx.cwd);
 			// Leave the session so only the runner writes to it; switching releases our lock.
-			await ctx.newSession();
-			ctx.ui.notify(`bg: ${basename(file)} started. /resume it any time; /bg list shows progress.`, "info");
+			await ctx.newSession({
+				withSession: async (c) => c.ui.notify(`bg: ${basename(file)} started. /resume it any time; /bg list shows progress.`, "info"),
+			});
 		},
 	});
 }
