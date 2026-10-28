@@ -13,6 +13,8 @@ export type Run = {
 	status: "waiting" | "running" | "done" | "error" | "stopped" | "died";
 	endedAt?: string;
 	error?: string;
+	/** Unix socket watchers connect to while the run is live. */
+	sock?: string;
 };
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -39,6 +41,7 @@ export function listRuns(dir: string): Run[] {
 			if (ended && Date.now() - ended > DAY) {
 				rmSync(join(dir, n), { force: true });
 				rmSync(r.log, { force: true });
+				if (r.sock) rmSync(r.sock, { force: true });
 				continue;
 			}
 			runs.push(r);

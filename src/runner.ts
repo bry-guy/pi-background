@@ -2,7 +2,8 @@
 // Usage: node runner.ts <pi-package-dir> <session-file> <message> <log-file>
 // Builds the session the same way pi's CLI does (dist/main.js createRuntime), minus CLI flags,
 // so it loads the same settings, extensions, packages, skills and AGENTS.md as the TUI.
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acquire, release, waitFree } from "./lock.ts";
@@ -34,6 +35,7 @@ const run: Run = {
 	log: log ?? "",
 	startedAt: new Date().toISOString(),
 	status: "running",
+	sock: join(dir, `${process.pid}.sock`),
 };
 const log_ = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 
@@ -50,6 +52,10 @@ const got = acquire(file, "bg");
 if (!got.ok) giveUp(`session locked by pid ${got.heldBy.pid} (${got.heldBy.role})`);
 writeRun(dir, run);
 
+let closeSocket = () => {};
+const textOf = (m: { content?: unknown }) =>
+	typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") : "";
+
 let runtime: { session: any; dispose(): Promise<void> } | undefined;
 let finished = false;
 async function finish(status: Run["status"], error?: string) {
@@ -61,6 +67,7 @@ async function finish(status: Run["status"], error?: string) {
 	} catch (e) {
 		log_("dispose failed", e);
 	}
+	closeSocket();
 	release(file);
 	writeRun(dir, { ...run, status, error, endedAt: new Date().toISOString() });
 	log_("finished", status, error ?? "");
@@ -127,9 +134,60 @@ try {
 	runtime = await pi.createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager });
 	const session = runtime!.session;
 	await session.bindExtensions({ mode: "print", onError: (e: { extensionPath: string; error: string }) => log_("extension error", e.extensionPath, e.error) });
+	// Watchers (a TUI that /resumed this session) connect here: we stream events out, and take
+	// queued messages and aborts in. One JSON object per line each way.
+	const watchers = new Set<Socket>();
+	const queued: string[] = [];
+	const send = (o: unknown) => {
+		const line = `${JSON.stringify(o)}\n`;
+		for (const w of watchers) w.write(line);
+	};
+	session.subscribe((e: any) => {
+		if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") send({ t: "text", d: e.assistantMessageEvent.delta });
+		else if (e.type === "message_start" && e.message?.role === "user") send({ t: "user", d: textOf(e.message) });
+		else if (e.type === "message_end" && e.message?.role === "assistant") send({ t: "end" });
+		else if (e.type === "tool_execution_start") send({ t: "tool", d: `${e.toolName} ${JSON.stringify(e.args ?? {}).slice(0, 120)}` });
+		else if (e.type === "tool_execution_end" && e.isError) send({ t: "tool_err", d: e.toolName });
+	});
+	const server = createServer((c) => {
+		watchers.add(c);
+		c.on("close", () => watchers.delete(c));
+		c.on("error", () => watchers.delete(c));
+		let buf = "";
+		c.on("data", (d) => {
+			buf += d;
+			for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+				const line = buf.slice(0, i);
+				buf = buf.slice(i + 1);
+				let m: { t: string; d?: string };
+				try {
+					m = JSON.parse(line);
+				} catch {
+					continue;
+				}
+				if (m.t === "abort") void session.abort().then(() => finish("stopped"));
+				else if (m.t === "msg" && m.d) {
+					log_("queued from watcher", JSON.stringify(m.d));
+					// Mid-run messages join the loop like a TUI follow-up; late ones run after it.
+					if (session.isStreaming) void session.followUp(m.d);
+					else queued.push(m.d);
+				}
+			}
+		});
+	});
+	rmSync(run.sock!, { force: true });
+	server.listen(run.sock);
+	closeSocket = () => {
+		for (const w of watchers) w.end();
+		server.close();
+		rmSync(run.sock!, { force: true });
+	};
+	writeRun(dir, run);
+
 	log_("prompting", JSON.stringify(msg), "model", session.model?.id);
 	const before = session.messages.length;
 	await session.prompt(msg);
+	while (queued.length) await session.prompt(queued.shift()!);
 	// An extension can swallow the prompt (pi-sync does when another device holds the conversation's lease).
 	const last = session.messages.at(-1);
 	if (session.messages.length === before)

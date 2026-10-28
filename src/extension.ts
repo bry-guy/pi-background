@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, writeFileSync } from "node:fs";
+import { connect, type Socket } from "node:net";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent";
@@ -8,6 +9,16 @@ import { listRuns, type Run } from "./registry.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
 const STATUS = "pi-background";
+const WATCH = "pi-background-watch";
+// Saved as the backgrounded turn's prompt so the model knows why its last step reads "aborted".
+const MOVED = "(This session was moved to the background mid-turn; the last step was interrupted.) Continue.";
+
+/** Session name, else its first user message, for notices. */
+const titleOf = (ctx: ExtensionContext) => {
+	const first = ctx.sessionManager.getEntries().find((e: any) => e.type === "message" && e.message?.role === "user") as any;
+	const text = first ? [first.message.content].flat().map((c: any) => (typeof c === "string" ? c : (c.text ?? ""))).join("") : "";
+	return ctx.sessionManager.getSessionName() ?? (text.slice(0, 40) || "session");
+};
 
 const runsDir = () => join(getAgentDir(), "background");
 const label = (r: Run) => `${r.name}  ${r.status}  ${r.startedAt.slice(11, 16)}  "${r.msg.slice(0, 50)}"`;
@@ -27,7 +38,7 @@ function spawnRunner(file: string, msg: string, cwd: string): void {
 }
 
 // pi re-runs the extension factory on every session switch, so state that must survive a switch lives here.
-let pendingContinue: string | undefined;
+let pendingNotice: string | undefined;
 const notified = new Set<string>();
 let primed = false;
 
@@ -38,6 +49,75 @@ export default function (pi: ExtensionAPI) {
 	let stale: string | undefined;
 	let ui: ExtensionContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
+	let watching: { file: string; sock?: Socket; lines: string[]; stopInput: () => void } | undefined;
+
+	const render = () => {
+		if (!watching || !ui) return;
+		ui.ui.setWidget(WATCH, ["── background session running (Esc stops it) ──", ...watching.lines.join("").split("\n").slice(-14)]);
+	};
+
+	/** Stream the background run on `file` into this TUI; reload the session when the run lets go of it. */
+	function watch(ctx: ExtensionContext, file: string) {
+		const w: NonNullable<typeof watching> = { file, lines: [], stopInput: () => {} };
+		watching = w;
+		ctx.ui.setStatus(WATCH, "background session running");
+		w.stopInput = ctx.ui.onTerminalInput((data) => {
+			if (watching !== w || data !== "\x1b") return undefined;
+			w.sock?.write(`${JSON.stringify({ t: "abort" })}\n`);
+			return { consume: true };
+		});
+		const attach = () => {
+			if (watching !== w) return;
+			const run = listRuns(runsDir()).find((r) => r.file === file && (r.status === "running" || r.status === "waiting"));
+			if (!run?.sock || !existsSync(run.sock)) {
+				// Runner still starting, or already gone: retry until it's live or the lock is free.
+				if (holder(file)?.role === "bg") setTimeout(attach, 500);
+				else void reload();
+				return;
+			}
+			const sock = connect(run.sock);
+			w.sock = sock;
+			let buf = "";
+			sock.on("data", (d) => {
+				buf += d;
+				for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+					let m: { t: string; d?: string };
+					try {
+						m = JSON.parse(buf.slice(0, i));
+					} catch {
+						m = { t: "" };
+					}
+					buf = buf.slice(i + 1);
+					if (m.t === "text") w.lines.push(m.d ?? "");
+					else if (m.t === "user") w.lines.push(`\n› ${m.d}\n`);
+					else if (m.t === "tool") w.lines.push(`\n⚙ ${m.d}\n`);
+					else if (m.t === "tool_err") w.lines.push(`✗ ${m.d} failed\n`);
+					else if (m.t === "end") w.lines.push("\n");
+				}
+				render();
+			});
+			sock.on("error", () => {});
+			sock.on("close", () => void reload());
+		};
+		const reload = async () => {
+			if (watching !== w) return;
+			await waitFree(file, 120_000);
+			if (watching !== w) return;
+			// Only a command context can switch sessions; switching to the same file reloads what the runner wrote.
+			pi.sendUserMessage("/bg-reload", { expandPromptTemplates: true });
+		};
+		attach();
+		render();
+	}
+
+	function unwatch() {
+		if (!watching) return;
+		watching.stopInput();
+		watching.sock?.destroy();
+		watching = undefined;
+		ui?.ui.setWidget(WATCH, undefined);
+		ui?.ui.setStatus(WATCH, undefined);
+	}
 
 	const poll = () => {
 		const runs = listRuns(runsDir());
@@ -59,10 +139,9 @@ export default function (pi: ExtensionAPI) {
 		timer.unref();
 		lock(ctx);
 		const file = ctx.sessionManager.getSessionFile();
-		if (pendingContinue && pendingContinue === file) {
-			pendingContinue = undefined;
-			setTimeout(() => pi.sendUserMessage("continue"), 0); // after the switch finishes
-		}
+		if (file && holder(file)?.role === "bg") watch(ctx, file);
+		if (pendingNotice) ctx.ui.notify(pendingNotice, "info");
+		pendingNotice = undefined;
 	});
 
 	// A new session's file appears only after its first reply, so retry around turns.
@@ -74,20 +153,25 @@ export default function (pi: ExtensionAPI) {
 		if (!file || held === file || !existsSync(file)) return; // no file yet: nobody else can be writing it
 		const got = acquire(file, "tui");
 		if (got.ok) held = file;
-		else {
+		else if (got.heldBy.role !== "bg") {
 			stale = file;
 			ctx.ui.notify(
-				got.heldBy.role === "bg"
-					? `This session is running in the background (pid ${got.heldBy.pid}). Switch away, or /bg stop it, before typing here.`
-					: `This session is open in another pi (pid ${got.heldBy.pid}). Writing from both corrupts it.`,
+				`This session is open in another pi (pid ${got.heldBy.pid}). Writing from both corrupts it.`,
 				"warning",
 			);
 		}
 	}
 
 	// Startup (pi -c, pi --session) fires no session_before_switch, so the only safe gate is before input is accepted.
-	pi.on("input", (_event, ctx) => {
+	pi.on("input", (event, ctx) => {
 		const file = ctx.sessionManager.getSessionFile();
+		if (watching && watching.file === file) {
+			// Like typing during a turn: the message is queued and the background run picks it up.
+			watching.sock?.write(`${JSON.stringify({ t: "msg", d: event.text })}\n`);
+			watching.lines.push(`\n⏳ queued: ${event.text}\n`);
+			render();
+			return { action: "handled" };
+		}
 		if (!file || held === file) return { action: "continue" };
 		if (stale !== file) {
 			lock(ctx);
@@ -107,49 +191,27 @@ export default function (pi: ExtensionAPI) {
 		if (held) release(held);
 		held = undefined;
 		stale = undefined;
+		unwatch();
 		clearInterval(timer);
 		ui = undefined; // this ctx goes stale once the session is replaced
 	});
 
-	pi.on("session_before_switch", async (event, ctx) => {
-		const target = event.targetSessionFile;
-		const h = target ? holder(target) : undefined;
-		if (target && h?.role === "bg") {
-			if (!ctx.hasUI) return { cancel: true };
-			const c = await ctx.ui.select(`${basename(target)} is running in the background`, [
-				"Wait for its turn to end",
-				"Stop it and continue here",
-				"Cancel",
-			]);
-			if (!c || c === "Cancel") return { cancel: true };
-			if (c.startsWith("Stop")) {
-				try {
-					process.kill(h.pid, "SIGTERM");
-				} catch {} // already gone: waitFree returns at once
-				pendingContinue = target;
-			}
-			// Wait with a dialog the user can dismiss at any time; it closes itself when the run frees the session.
-			const done = new AbortController();
-			// Cancel or Escape resolves the dialog, which stops the wait. Resolving after we abort it is harmless.
-			void ctx.ui
-				.select(`Waiting for the background turn on ${basename(target)} to end…`, ["Cancel"], { signal: done.signal })
-				.then(() => done.abort());
-			const free = await waitFree(target, Infinity, done.signal);
-			done.abort();
-			if (!free) {
-				pendingContinue = undefined;
-				ctx.ui.notify("Stopped waiting; still running in the background.", "info");
-				return { cancel: true };
-			}
-		}
+	pi.on("session_before_switch", (_event, ctx) => {
+		// Leaving mid-turn: pi aborts and saves the turn, we release the lock, and the runner (waiting on it) finishes the work.
 		const current = ctx.sessionManager.getSessionFile();
-		if (current && !ctx.isIdle() && ctx.hasUI) {
-			const c = await ctx.ui.select("This session is still working", ["Move it to the background", "Abort it", "Cancel"]);
-			if (!c || c === "Cancel") return { cancel: true };
-			// pi aborts and saves the turn during the switch, then we release the lock; the runner waits for that.
-			if (c.startsWith("Move")) spawnRunner(current, "continue", ctx.cwd);
+		if (current && !ctx.isIdle() && !watching) {
+			spawnRunner(current, MOVED, ctx.cwd);
+			pendingNotice = `Running "${titleOf(ctx)}" in background…`;
 		}
 		return undefined;
+	});
+
+	pi.registerCommand("bg-reload", {
+		description: "(internal) reload a session after its background turn ends",
+		handler: async (_args, ctx) => {
+			const file = ctx.sessionManager.getSessionFile();
+			if (file) await ctx.switchSession(file);
+		},
 	});
 
 	pi.registerCommand("bg", {
@@ -173,13 +235,15 @@ export default function (pi: ExtensionAPI) {
 			}
 			const file = ctx.sessionManager.getSessionFile();
 			if (!file) return ctx.ui.notify("This session isn't saved to a file, so it can't run in the background.", "error");
-			if (!ctx.isIdle()) return ctx.ui.notify("Busy. Switch sessions and pick 'Move it to the background' instead.", "warning");
+			if (!arg) return ctx.ui.notify("Usage: /bg <message>", "warning");
+			if (!ctx.isIdle()) return ctx.ui.notify("Busy. Just switch sessions; the turn moves to the background.", "warning");
 			// pi writes a new session's file only after the first reply; the runner needs it to exist.
 			if (!existsSync(file)) writeFileSync(file, `${JSON.stringify(ctx.sessionManager.getHeader())}\n`);
-			spawnRunner(file, arg || "continue", ctx.cwd);
+			spawnRunner(file, arg, ctx.cwd);
+			const notice = `Running "${titleOf(ctx)}" in background…`;
 			// Leave the session so only the runner writes to it; switching releases our lock.
 			await ctx.newSession({
-				withSession: async (c) => c.ui.notify(`bg: ${basename(file)} started. /resume it any time; /bg list shows progress.`, "info"),
+				withSession: async (c) => c.ui.notify(notice, "info"),
 			});
 		},
 	});

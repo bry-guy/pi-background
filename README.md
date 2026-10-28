@@ -12,20 +12,19 @@ Install [pi-keepalive](https://github.com/bry-guy/pi-keepalive) too if you want 
 
 ## Use
 
-- `/bg <message>`: run `<message>` in this session in the background. You're moved to a new session right away.
-- `/bg`: continue an interrupted turn in the background (sends `continue`).
-- `/bg list`: list background runs from the last day and their status.
-- `/bg stop`: stop a running background turn. The partial turn is saved.
-- **Switching away while a turn is running** asks whether to move it to the background, abort it, or cancel.
-- **Resuming a session that's running in the background** asks whether to wait for its turn to end, stop it and continue here, or cancel.
+- **Switch away while a turn is running** (`/resume`, `/new`, `/project`): the turn keeps going in the background. You see `Running "<session>" in background…`, and the footer shows `bg: N running`.
+- **Go back to it** with `/resume`: you watch it live. A status says "background session running", messages you type are queued and picked up by the run, and Esc stops it. When the turn ends, it's a normal session again.
+- `/bg <message>`: send a message and leave in one step.
+- `/bg list`, `/bg stop`: housekeeping.
 
-The footer shows `bg: N running`. You get a notification when a run finishes.
+Moving a turn mid-step restarts that step; the runner tells the model it was moved.
 
 ## How it works
 
 - **Lock.** Every pi with this extension holds a lock (`<session>.jsonl.lock`, recording pid, host and role) on the session it has open. Pi core and pi-sync don't lock session files, so this is what stops two processes writing to one session.
 - **Runner.** Each background run is a detached `node src/runner.ts` process. It builds the session the way pi's CLI does (`createAgentSessionServices` and `createAgentSessionFromServices` from the installed pi), so it loads the same settings, extensions, packages, skills and AGENTS.md as your TUI.
-- **One turn per run.** The runner runs a single turn, then saves and exits. On SIGTERM it aborts the turn first, so the partial turn is saved.
+- **One turn per run.** The runner runs a single turn (plus any messages queued while you watch), then saves and exits.
+- **Watching.** The runner streams events over `~/.pi/agent/background/<pid>.sock`; the TUI shows them under the transcript and reloads the session when the run ends. On SIGTERM it aborts the turn first, so the partial turn is saved.
 - **Run records.** Runs are recorded in `~/.pi/agent/background/<pid>.json`, with a log next to each record.
 - **Extensions can tell.** Extensions see `PI_BACKGROUND=1` and `hasUI=false` inside a runner.
 
