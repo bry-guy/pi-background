@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, openSync, realpathSync, writeFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent";
 import { acquire, holder, release, waitFree } from "./lock.ts";
@@ -23,13 +23,29 @@ const titleOf = (ctx: ExtensionContext) => {
 const runsDir = () => join(getAgentDir(), "background");
 const label = (r: Run) => `${r.name}  ${r.status}  ${r.startedAt.slice(11, 16)}  "${r.msg.slice(0, 50)}"`;
 
+/**
+ * The pi package the runner should load. This process's own getPackageDir() can point at a removed or
+ * bundled install (a pi started before an upgrade), so fall back to the pi on PATH.
+ */
+function piPackageDir(): string {
+	const own = getPackageDir();
+	if (existsSync(join(own, "dist/index.js"))) return own;
+	const bin = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
+	// npm installs link into the package itself; Homebrew's pi is a wrapper next to libexec/.
+	for (let d = dirname(bin); d !== "/"; d = dirname(d)) {
+		for (const c of [d, join(d, "libexec/lib/node_modules/@earendil-works/pi-coding-agent")])
+			if (existsSync(join(c, "dist/index.js")) && existsSync(join(c, "package.json"))) return c;
+	}
+	return own;
+}
+
 /** Start a detached runner for one turn on `file`. It waits for this process to release the session lock. */
 function spawnRunner(file: string, msg: string, cwd: string): void {
 	const dir = runsDir();
 	mkdirSync(dir, { recursive: true });
 	const log = join(dir, `${Date.now()}-${basename(file, ".jsonl")}.log`);
 	const out = openSync(log, "a");
-	spawn(process.execPath, [RUNNER, getPackageDir(), file, msg, log], {
+	spawn(process.execPath, [RUNNER, piPackageDir(), file, msg, log], {
 		cwd,
 		detached: true,
 		stdio: ["ignore", out, out],
