@@ -142,6 +142,16 @@ try {
 		const line = `${JSON.stringify(o)}\n`;
 		for (const w of watchers) w.write(line);
 	};
+	// What a watcher that connects mid-message missed: the reply so far and the tool now running.
+	let partial = "";
+	let tool: string | undefined;
+	session.subscribe((e: any) => {
+		if (e.type === "message_start" && e.message?.role === "assistant") partial = "";
+		else if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") partial += e.assistantMessageEvent.delta;
+		else if (e.type === "message_end" && e.message?.role === "assistant") partial = "";
+		else if (e.type === "tool_execution_start") tool = `${e.toolName} ${JSON.stringify(e.args ?? {}).slice(0, 120)}`;
+		else if (e.type === "tool_execution_end") tool = undefined;
+	});
 	session.subscribe((e: any) => {
 		if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") send({ t: "text", d: e.assistantMessageEvent.delta });
 		else if (e.type === "message_start" && e.message?.role === "user") send({ t: "user", d: textOf(e.message) });
@@ -150,6 +160,8 @@ try {
 		else if (e.type === "tool_execution_end" && e.isError) send({ t: "tool_err", d: e.toolName });
 	});
 	const server = createServer((c) => {
+		if (partial) c.write(`${JSON.stringify({ t: "text", d: partial })}\n`);
+		if (tool) c.write(`${JSON.stringify({ t: "tool", d: tool })}\n`);
 		watchers.add(c);
 		c.on("close", () => watchers.delete(c));
 		c.on("error", () => watchers.delete(c));

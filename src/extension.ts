@@ -40,23 +40,31 @@ function piPackageDir(): string {
 }
 
 /** Start a detached runner for one turn on `file`. It waits for this process to release the session lock. */
-function spawnRunner(file: string, msg: string, cwd: string): void {
+function spawnRunner(file: string, msg: string, cwd: string, warn: (text: string) => void): void {
 	const dir = runsDir();
 	mkdirSync(dir, { recursive: true });
 	const log = join(dir, `${Date.now()}-${basename(file, ".jsonl")}.log`);
 	const out = openSync(log, "a");
-	spawn(process.execPath, [RUNNER, piPackageDir(), file, msg, log], {
+	const child = spawn(process.execPath, [RUNNER, piPackageDir(), file, msg, log], {
 		cwd,
 		detached: true,
 		stdio: ["ignore", out, out],
 		env: { ...process.env, PI_BACKGROUND: "1" },
-	}).unref();
+	});
+	// A runner that dies before writing its run record would otherwise vanish without a trace.
+	child.on("exit", (code) => {
+		if (code && !listRuns(dir).some((r) => r.pid === child.pid)) warn(`Background run failed to start (exit ${code}). Log: ${log}`);
+	});
+	child.unref();
 }
 
 // pi re-runs the extension factory on every session switch, so state that must survive a switch lives here.
 let pendingNotice: string | undefined;
 const notified = new Set<string>();
 let primed = false;
+// The live session's ui; a runner's exit can arrive after the session that started it was replaced.
+let liveUi: ExtensionContext["ui"] | undefined;
+const warn = (text: string) => liveUi?.notify(text, "error");
 
 export default function (pi: ExtensionAPI) {
 	if (process.env.PI_BACKGROUND) return; // the runner locks its own session; don't nest
@@ -149,6 +157,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		ui = ctx;
+		liveUi = ctx.ui;
 		poll(); // the first poll in a pi process marks already-finished runs as seen without notifying
 		primed = true;
 		timer = setInterval(poll, 5000);
@@ -209,14 +218,15 @@ export default function (pi: ExtensionAPI) {
 		stale = undefined;
 		unwatch();
 		clearInterval(timer);
-		ui = undefined; // this ctx goes stale once the session is replaced
+		ui = undefined;
+		liveUi = undefined; // this ctx goes stale once the session is replaced
 	});
 
 	pi.on("session_before_switch", (_event, ctx) => {
 		// Leaving mid-turn: pi aborts and saves the turn, we release the lock, and the runner (waiting on it) finishes the work.
 		const current = ctx.sessionManager.getSessionFile();
 		if (current && !ctx.isIdle() && !watching) {
-			spawnRunner(current, MOVED, ctx.cwd);
+			spawnRunner(current, MOVED, ctx.cwd, warn);
 			pendingNotice = `Running "${titleOf(ctx)}" in background…`;
 		}
 		return undefined;
@@ -255,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx.isIdle()) return ctx.ui.notify("Busy. Just switch sessions; the turn moves to the background.", "warning");
 			// pi writes a new session's file only after the first reply; the runner needs it to exist.
 			if (!existsSync(file)) writeFileSync(file, `${JSON.stringify(ctx.sessionManager.getHeader())}\n`);
-			spawnRunner(file, arg, ctx.cwd);
+			spawnRunner(file, arg, ctx.cwd, warn);
 			const notice = `Running "${titleOf(ctx)}" in background…`;
 			// Leave the session so only the runner writes to it; switching releases our lock.
 			await ctx.newSession({
