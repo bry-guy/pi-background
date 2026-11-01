@@ -38,7 +38,7 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 - A plain `pi` without this extension ignores the lock. With it, a pi that opens a session another process is writing (e.g. `pi -c`) refuses to send until you `/resume` it.
 - Projects whose project-local resources aren't trusted run without them; the runner can't show the trust prompt.
 - Extensions' fully custom UI components (`ctx.ui.custom`) get no answer in a background run.
-- The runner loads pi's built-in extensions from pi's `dist/extensions/index.js`, which pi doesn't export; a pi release that moves it breaks background runs until this is updated.
+- The runner loads pi's built-in extensions from pi's `dist/extensions/index.js`, which pi doesn't export; if a pi release moves it, background runs go on without pi's built-in extensions (mcp, tool-search, …) and say so in the run log.
 - pi-sync: background turns hold the conversation's lease and are pushed when they finish. Enrolling background-only sessions, and not releasing a running turn's lease from another local pi, need pi-sync with the `bg-enroll-lease` fix. If another device holds the lease, the run ends as an error.
 
 ## Test
