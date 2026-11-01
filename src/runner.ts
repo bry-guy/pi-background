@@ -2,12 +2,13 @@
 // Usage: node runner.ts <pi-package-dir> <session-file> <message> <log-file>
 // Builds the session the same way pi's CLI does (dist/main.js createRuntime), minus CLI flags,
 // so it loads the same settings, extensions, packages, skills and AGENTS.md as the TUI.
+import { randomUUID } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acquire, release, waitFree } from "./lock.ts";
-import { type Run, writeRun } from "./registry.ts";
+import { type Ask, type Run, writeRun } from "./registry.ts";
 
 const [pkgDir, file, msg, log] = process.argv.slice(2);
 if (!pkgDir || !file || !msg) {
@@ -57,10 +58,60 @@ const textOf = (m: { content?: unknown }) =>
 	typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") : "";
 
 let runtime: { session: any; dispose(): Promise<void> } | undefined;
+
+// Extension dialogs wait here until a TUI answers (watching it, or /bg from any session). No timeout of our own:
+// a background turn that needs you waits for you, rather than going on with "no".
+const asks = new Map<string, { ask: Ask; fallback: unknown; finish: (value: unknown) => void }>();
+let broadcast: (o: unknown) => void = () => {};
+const syncWaiting = () => {
+	run.waiting = asks.size ? [...asks.values()].map((a) => a.ask) : undefined;
+	if (!finished) writeRun(dir, run);
+};
+function ask<T>(question: Omit<Ask, "id">, fallback: T, opts?: { signal?: AbortSignal; timeout?: number }): Promise<T> {
+	return new Promise((resolve) => {
+		if (opts?.signal?.aborted || stopping) return resolve(fallback);
+		const id = randomUUID();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const onAbort = () => finish(fallback);
+		const finish = (value: unknown) => {
+			if (!asks.has(id)) return;
+			asks.delete(id);
+			if (timer) clearTimeout(timer);
+			opts?.signal?.removeEventListener("abort", onAbort);
+			broadcast({ t: "asked", id });
+			syncWaiting();
+			log_("answered", question.title, JSON.stringify(value));
+			resolve(value as T);
+		};
+		opts?.signal?.addEventListener("abort", onAbort, { once: true });
+		// An extension's own timeout still applies.
+		if (opts?.timeout && opts.timeout > 0) timer = setTimeout(onAbort, opts.timeout);
+		const full: Ask = { ...question, id };
+		asks.set(id, { ask: full, fallback, finish });
+		log_("waiting on you:", question.title);
+		broadcast({ t: "ask", ...full });
+		syncWaiting();
+	});
+}
+/** Stopping: open questions, and any asked from now on, get their "no answer" value so the turn can unwind. */
+let stopping = false;
+function dropAsks() {
+	stopping = true;
+	for (const a of [...asks.values()]) a.finish(a.fallback);
+}
+function answer(id: string, value: unknown) {
+	const a = asks.get(id);
+	if (!a) return;
+	const { method, options } = a.ask;
+	if (method === "confirm") a.finish(value === true);
+	else if (method === "select") a.finish(typeof value === "string" && options?.includes(value) ? value : undefined);
+	else a.finish(typeof value === "string" ? value : undefined);
+}
 let finished = false;
 async function finish(status: Run["status"], error?: string) {
 	if (finished) return;
 	finished = true;
+	dropAsks();
 	run.name = runtime?.session.sessionManager.getSessionName() ?? run.name; // auto-titles may land during the turn
 	try {
 		await runtime?.dispose(); // emits session_shutdown, so extensions like pi-sync and pi-keepalive clean up
@@ -69,7 +120,7 @@ async function finish(status: Run["status"], error?: string) {
 	}
 	closeSocket();
 	release(file);
-	writeRun(dir, { ...run, status, error, endedAt: new Date().toISOString() });
+	writeRun(dir, { ...run, waiting: undefined, status, error, endedAt: new Date().toISOString() });
 	log_("finished", status, error ?? "");
 	process.exit(status === "done" ? 0 : 1);
 }
@@ -79,6 +130,7 @@ for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
 		if (finished) return;
 		log_("got", sig, "- aborting so the partial turn is saved");
 		try {
+			dropAsks();
 			await runtime?.session.abort();
 		} catch (e) {
 			log_("abort failed", e);
@@ -133,7 +185,20 @@ try {
 	run.name = sessionManager.getSessionName() ?? run.name;
 	runtime = await pi.createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager });
 	const session = runtime!.session;
-	await session.bindExtensions({ mode: "print", onError: (e: { extensionPath: string; error: string }) => log_("extension error", e.extensionPath, e.error) });
+	// Dialogs go to a TUI instead of the print-mode no-op (which answers "no" to everything); the rest stays a no-op.
+	const base = session.extensionRunner.getUIContext();
+	const uiContext = {
+		...base,
+		select: (title: string, options: string[], opts?: any) => ask({ method: "select", title, options }, undefined, opts),
+		confirm: (title: string, message: string, opts?: any) => ask({ method: "confirm", title, message }, false, opts),
+		input: (title: string, placeholder?: string, opts?: any) => ask({ method: "input", title, placeholder }, undefined, opts),
+		editor: (title: string, prefill?: string) => ask({ method: "editor", title, prefill }, undefined),
+		notify: (message: string, type?: string) => {
+			log_("notify", type ?? "info", message);
+			broadcast({ t: "notify", d: message, level: type ?? "info" });
+		},
+	};
+	await session.bindExtensions({ mode: "print", uiContext, onError: (e: { extensionPath: string; error: string }) => log_("extension error", e.extensionPath, e.error) });
 	// Watchers (a TUI that /resumed this session) connect here: we stream events out, and take
 	// queued messages and aborts in. One JSON object per line each way.
 	const watchers = new Set<Socket>();
@@ -142,6 +207,7 @@ try {
 		const line = `${JSON.stringify(o)}\n`;
 		for (const w of watchers) w.write(line);
 	};
+	broadcast = send;
 	// What a watcher that connects mid-message missed: the reply so far and the tool now running.
 	let partial = "";
 	let tool: string | undefined;
@@ -162,6 +228,7 @@ try {
 	const server = createServer((c) => {
 		if (partial) c.write(`${JSON.stringify({ t: "text", d: partial })}\n`);
 		if (tool) c.write(`${JSON.stringify({ t: "tool", d: tool })}\n`);
+		for (const a of asks.values()) c.write(`${JSON.stringify({ t: "ask", ...a.ask })}\n`);
 		watchers.add(c);
 		c.on("close", () => watchers.delete(c));
 		c.on("error", () => watchers.delete(c));
@@ -171,13 +238,14 @@ try {
 			for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
 				const line = buf.slice(0, i);
 				buf = buf.slice(i + 1);
-				let m: { t: string; d?: string; id?: string };
+				let m: { t: string; d?: string; id?: string; value?: unknown };
 				try {
 					m = JSON.parse(line);
 				} catch {
 					continue;
 				}
-				if (m.t === "abort") void session.abort().then(() => finish("stopped"));
+				if (m.t === "answer" && m.id) answer(m.id, m.value);
+				else if (m.t === "abort") void (dropAsks(), session.abort()).then(() => finish("stopped"));
 				else if (m.t === "msg" && m.d) {
 					log_("queued from watcher", JSON.stringify(m.d));
 					// Run after the current prompt, in order. One that arrives after the last is never confirmed

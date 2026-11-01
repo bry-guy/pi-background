@@ -15,6 +15,19 @@ export type Run = {
 	error?: string;
 	/** Unix socket watchers connect to while the run is live. */
 	sock?: string;
+	/** Questions an extension asked that wait for an answer from a TUI; the turn is paused on them. */
+	waiting?: Ask[];
+};
+
+/** An extension dialog (select, confirm, input, editor) a background run forwards to whoever answers first. */
+export type Ask = {
+	id: string;
+	method: "select" | "confirm" | "input" | "editor";
+	title: string;
+	message?: string;
+	options?: string[];
+	placeholder?: string;
+	prefill?: string;
 };
 
 const DAY = 24 * 60 * 60 * 1000;
