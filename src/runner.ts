@@ -17,7 +17,14 @@ if (!pkgDir || !file || !msg) {
 }
 
 const pi = await import(pathToFileURL(join(pkgDir, "dist/index.js")).href);
-const { builtInExtensions } = await import(pathToFileURL(join(pkgDir, "dist/extensions/index.js")).href);
+// pi's built-in extensions (mcp, tool-search, ...) aren't exported. If a pi release moves them, run without them
+// rather than fail; the run log says so.
+const builtInExtensions: unknown[] = await import(pathToFileURL(join(pkgDir, "dist/extensions/index.js")).href)
+	.then((m) => (Array.isArray(m.builtInExtensions) ? m.builtInExtensions : Promise.reject(new Error("no builtInExtensions export"))))
+	.catch((e) => {
+		console.log(new Date().toISOString(), `running without pi's built-in extensions: ${e instanceof Error ? e.message : e}`);
+		return [];
+	});
 
 const agentDir: string = pi.getAgentDir();
 const dir = join(agentDir, "background");
