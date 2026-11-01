@@ -1,8 +1,8 @@
 // Detached background runner: runs one turn of an existing pi session, then exits.
 // Usage: node runner.ts <pi-package-dir> <session-file> <message> <log-file>
-// Builds the session the same way pi's CLI does (dist/main.js createRuntime), minus CLI flags,
-// so it loads the same settings, extensions, packages, skills and AGENTS.md as the TUI.
-import { randomUUID } from "node:crypto";
+// pi runs as `pi --mode rpc --session <file>` under it, so the session loads exactly what the CLI loads
+// (settings, extensions incl. built-ins, packages, skills, AGENTS.md, enabledModels) through public interfaces only.
+import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync, rmSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { basename, join } from "node:path";
@@ -16,15 +16,12 @@ if (!pkgDir || !file || !msg) {
 	process.exit(2);
 }
 
-const pi = await import(pathToFileURL(join(pkgDir, "dist/index.js")).href);
-// pi's built-in extensions (mcp, tool-search, ...) aren't exported. If a pi release moves them, run without them
-// rather than fail; the run log says so.
-const builtInExtensions: unknown[] = await import(pathToFileURL(join(pkgDir, "dist/extensions/index.js")).href)
-	.then((m) => (Array.isArray(m.builtInExtensions) ? m.builtInExtensions : Promise.reject(new Error("no builtInExtensions export"))))
-	.catch((e) => {
-		console.log(new Date().toISOString(), `running without pi's built-in extensions: ${e instanceof Error ? e.message : e}`);
-		return [];
-	});
+// Only pi's public surface: its package entry (for getAgentDir) and its CLI (`pi --mode rpc`), which loads
+// everything the TUI does, built-in extensions included.
+const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+const entry: string = pkg.exports?.["."]?.import ?? pkg.main;
+const bin: string = typeof pkg.bin === "string" ? pkg.bin : pkg.bin.pi;
+const pi = await import(pathToFileURL(join(pkgDir, entry)).href);
 
 const agentDir: string = pi.getAgentDir();
 const dir = join(agentDir, "background");
@@ -64,66 +61,83 @@ let closeSocket = () => {};
 const textOf = (m: { content?: unknown }) =>
 	typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") : "";
 
-let runtime: { session: any; dispose(): Promise<void> } | undefined;
+// pi itself runs in `pi --mode rpc --session <file>`: JSON commands on its stdin, events and responses on its stdout.
+let child: ChildProcess | undefined;
+let reqId = 0;
+const pending = new Map<string, (r: any) => void>();
+const listeners = new Set<(e: any) => void>();
+function rpc(command: Record<string, unknown>): Promise<any> {
+	const id = `r${++reqId}`;
+	return new Promise((resolve, reject) => {
+		if (!child?.stdin?.writable) return reject(new Error("pi is not running"));
+		pending.set(id, (r) => (r.success ? resolve(r.data) : reject(new Error(r.error ?? `${command.type} failed`))));
+		child.stdin.write(`${JSON.stringify({ ...command, id })}\n`);
+	});
+}
+const reply = (o: unknown) => child?.stdin?.writable && child.stdin.write(`${JSON.stringify(o)}\n`);
+/** Resolves on the next event that matches. */
+const next = (match: (e: any) => boolean) =>
+	new Promise<any>((resolve) => {
+		const l = (e: any) => {
+			if (!match(e)) return;
+			listeners.delete(l);
+			resolve(e);
+		};
+		listeners.add(l);
+	});
 
 // Extension dialogs wait here until a TUI answers (watching it, or /bg from any session). No timeout of our own:
 // a background turn that needs you waits for you, rather than going on with "no".
-const asks = new Map<string, { ask: Ask; fallback: unknown; finish: (value: unknown) => void }>();
+const asks = new Map<string, Ask & { timer?: ReturnType<typeof setTimeout> }>();
 let broadcast: (o: unknown) => void = () => {};
 const syncWaiting = () => {
-	run.waiting = asks.size ? [...asks.values()].map((a) => a.ask) : undefined;
+	run.waiting = asks.size ? [...asks.values()].map(({ timer: _, ...a }) => a) : undefined;
 	if (!finished) writeRun(dir, run);
 };
-function ask<T>(question: Omit<Ask, "id">, fallback: T, opts?: { signal?: AbortSignal; timeout?: number }): Promise<T> {
-	return new Promise((resolve) => {
-		if (opts?.signal?.aborted || stopping) return resolve(fallback);
-		const id = randomUUID();
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const onAbort = () => finish(fallback);
-		const finish = (value: unknown) => {
-			if (!asks.has(id)) return;
-			asks.delete(id);
-			if (timer) clearTimeout(timer);
-			opts?.signal?.removeEventListener("abort", onAbort);
-			broadcast({ t: "asked", id });
-			syncWaiting();
-			log_("answered", question.title, JSON.stringify(value));
-			resolve(value as T);
-		};
-		opts?.signal?.addEventListener("abort", onAbort, { once: true });
-		// An extension's own timeout still applies.
-		if (opts?.timeout && opts.timeout > 0) timer = setTimeout(onAbort, opts.timeout);
-		const full: Ask = { ...question, id };
-		asks.set(id, { ask: full, fallback, finish });
-		log_("waiting on you:", question.title);
-		broadcast({ t: "ask", ...full });
-		syncWaiting();
-	});
+function ask(a: Ask, timeout?: number) {
+	// pi gives up on its own after an extension's timeout and doesn't tell us; drop the question then too.
+	const timer = timeout && timeout > 0 ? setTimeout(() => settle(a.id), timeout) : undefined;
+	asks.set(a.id, { ...a, timer });
+	log_("waiting on you:", a.title);
+	broadcast({ t: "ask", ...a });
+	syncWaiting();
 }
-/** Stopping: open questions, and any asked from now on, get their "no answer" value so the turn can unwind. */
-let stopping = false;
-function dropAsks() {
-	stopping = true;
-	for (const a of [...asks.values()]) a.finish(a.fallback);
+/** Removes a question; with a response, also sends it to pi. */
+function settle(id: string, response?: Record<string, unknown>) {
+	const a = asks.get(id);
+	if (!a) return;
+	asks.delete(id);
+	if (a.timer) clearTimeout(a.timer);
+	if (response) reply({ type: "extension_ui_response", id, ...response });
+	broadcast({ t: "asked", id });
+	syncWaiting();
+	log_("answered", a.title, JSON.stringify(response ?? "(dropped)"));
 }
 function answer(id: string, value: unknown) {
 	const a = asks.get(id);
 	if (!a) return;
-	const { method, options } = a.ask;
-	if (method === "confirm") a.finish(value === true);
-	else if (method === "select") a.finish(typeof value === "string" && options?.includes(value) ? value : undefined);
-	else a.finish(typeof value === "string" ? value : undefined);
+	if (a.method === "confirm") settle(id, { confirmed: value === true });
+	else if (typeof value === "string" && (a.method !== "select" || a.options?.includes(value))) settle(id, { value });
+	else settle(id, { cancelled: true });
 }
+/** A turn that ends or stops takes its open questions with it. */
+const dropAsks = () => {
+	for (const id of [...asks.keys()]) settle(id, { cancelled: true });
+};
+
 let finished = false;
 async function finish(status: Run["status"], error?: string) {
 	if (finished) return;
 	finished = true;
 	dropAsks();
-	run.name = runtime?.session.sessionManager.getSessionName() ?? run.name; // auto-titles may land during the turn
 	try {
-		await runtime?.dispose(); // emits session_shutdown, so extensions like pi-sync and pi-keepalive clean up
-	} catch (e) {
-		log_("dispose failed", e);
+		run.name = (await withTimeout(rpc({ type: "get_state" }), 5_000))?.sessionName ?? run.name; // auto-titles land during the turn
+	} catch {}
+	// Closing stdin makes pi shut down: session_shutdown runs, so pi-sync and pi-keepalive clean up.
+	if (child && child.exitCode === null) {
+		const exited = new Promise((r) => child!.once("exit", r));
+		child.stdin?.end();
+		if (!(await withTimeout(exited, 15_000).then(() => true, () => false))) child.kill("SIGKILL");
 	}
 	closeSocket();
 	release(file);
@@ -131,83 +145,66 @@ async function finish(status: Run["status"], error?: string) {
 	log_("finished", status, error ?? "");
 	process.exit(status === "done" ? 0 : 1);
 }
+const withTimeout = <T>(p: Promise<T>, ms: number) =>
+	Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timed out")), ms).unref())]);
 
-for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
-	process.on(sig, async () => {
-		if (finished) return;
-		log_("got", sig, "- aborting so the partial turn is saved");
-		try {
-			dropAsks();
-			await runtime?.session.abort();
-		} catch (e) {
-			log_("abort failed", e);
-		}
-		await finish("stopped");
-	});
+/** Stops the turn; pi's abort resolves once the partial turn is saved. */
+async function stop(why: string) {
+	if (finished) return;
+	log_(why, "- aborting so the partial turn is saved");
+	dropAsks();
+	try {
+		await withTimeout(rpc({ type: "abort" }), 15_000);
+	} catch (e) {
+		log_("abort failed", e);
+	}
+	await finish("stopped");
 }
+for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const) process.on(sig, () => void stop(`got ${sig}`));
 
 try {
-	process.chdir(cwd);
-	const trustStore = new pi.ProjectTrustStore(agentDir);
-	const projectTrusted = !pi.hasTrustRequiringProjectResources(cwd) || trustStore.get(cwd) === true;
-	if (!projectTrusted) log_("project is not trusted; its project-local resources are skipped");
-
-	const createRuntime = async (o: { cwd: string; agentDir: string; sessionManager: unknown; sessionStartEvent?: unknown }) => {
-		const settingsManager = pi.SettingsManager.create(o.cwd, o.agentDir, { projectTrusted });
-		const services = await pi.createAgentSessionServices({
-			cwd: o.cwd,
-			agentDir: o.agentDir,
-			settingsManager,
-			modelRuntimeSignal: AbortSignal.timeout(15_000),
-			resourceLoaderOptions: { extensionFactories: builtInExtensions },
-		});
-		const ext = services.resourceLoader.getExtensions();
-		log_("extensions:", ext.extensions.map((e: { path: string }) => e.path.split("/node_modules/").at(-1)).join(", "));
-		for (const e of ext.errors) log_("extension failed:", e.path, e.error);
-		// Mirror main.js buildSessionOptions: enabledModels scope the model, and a new session starts on
-		// the saved default if it's in scope, else the first scoped model. Existing sessions restore their own.
-		const patterns: string[] | undefined = settingsManager.getEnabledModels();
-		const scoped: { model: any; thinkingLevel?: string }[] = patterns?.length
-			? (await pi.resolveModelScopeWithDiagnostics(patterns, services.modelRuntime, { signal: AbortSignal.timeout(15_000) })).scopedModels
-			: [];
-		const sm = o.sessionManager as { buildSessionContext(): { messages: unknown[] } };
-		let pick: (typeof scoped)[number] | undefined;
-		if (scoped.length && sm.buildSessionContext().messages.length === 0) {
-			const p = settingsManager.getDefaultProvider();
-			const id = settingsManager.getDefaultModel();
-			const saved = p && id ? services.modelRuntime.getModel(p, id) : undefined;
-			pick = scoped.find((x) => saved && x.model.provider === saved.provider && x.model.id === saved.id) ?? scoped[0];
+	// The session header's cwd wins in pi anyway; starting there keeps relative paths in extensions honest.
+	child = spawn(process.execPath, [join(pkgDir, bin), "--mode", "rpc", "--session", file], {
+		cwd,
+		env: process.env,
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	child.stderr!.on("data", (d) => process.stdout.write(d));
+	child.on("exit", (code, sig) => {
+		for (const r of pending.values()) r({ success: false, error: `pi exited (${sig ?? code})` });
+		pending.clear();
+		if (!finished) void finish("error", `pi exited unexpectedly (${sig ?? code})`);
+	});
+	let buf = "";
+	child.stdout!.on("data", (d) => {
+		buf += d;
+		for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+			const line = buf.slice(0, i);
+			buf = buf.slice(i + 1);
+			let m: any;
+			try {
+				m = JSON.parse(line);
+			} catch {
+				log_("pi:", line);
+				continue;
+			}
+			if (m.type === "response" && m.id && pending.has(m.id)) {
+				pending.get(m.id)!(m);
+				pending.delete(m.id);
+			} else if (m.type === "extension_ui_request") {
+				if (["select", "confirm", "input", "editor"].includes(m.method))
+					ask({ id: m.id, method: m.method, title: m.title, message: m.message, options: m.options, placeholder: m.placeholder, prefill: m.prefill }, m.timeout);
+				else if (m.method === "notify") {
+					log_("notify", m.notifyType ?? "info", m.message);
+					broadcast({ t: "notify", d: m.message, level: m.notifyType ?? "info" });
+				}
+			} else if (m.type === "extension_error") log_("extension error", m.extensionPath, m.error);
+			else for (const l of [...listeners]) l(m);
 		}
-		const created = await pi.createAgentSessionFromServices({
-			services,
-			sessionManager: o.sessionManager,
-			sessionStartEvent: o.sessionStartEvent,
-			model: pick?.model,
-			thinkingLevel: pick?.thinkingLevel,
-			scopedModels: scoped.length ? scoped : undefined,
-		});
-		return { ...created, services, diagnostics: [] };
-	};
-	const sessionManager = pi.SessionManager.open(file);
-	run.name = sessionManager.getSessionName() ?? run.name;
-	runtime = await pi.createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager });
-	const session = runtime!.session;
-	// Dialogs go to a TUI instead of the print-mode no-op (which answers "no" to everything); the rest stays a no-op.
-	const base = session.extensionRunner.getUIContext();
-	const uiContext = {
-		...base,
-		select: (title: string, options: string[], opts?: any) => ask({ method: "select", title, options }, undefined, opts),
-		confirm: (title: string, message: string, opts?: any) => ask({ method: "confirm", title, message }, false, opts),
-		input: (title: string, placeholder?: string, opts?: any) => ask({ method: "input", title, placeholder }, undefined, opts),
-		editor: (title: string, prefill?: string) => ask({ method: "editor", title, prefill }, undefined),
-		notify: (message: string, type?: string) => {
-			log_("notify", type ?? "info", message);
-			broadcast({ t: "notify", d: message, level: type ?? "info" });
-		},
-	};
-	await session.bindExtensions({ mode: "print", uiContext, onError: (e: { extensionPath: string; error: string }) => log_("extension error", e.extensionPath, e.error) });
+	});
+
 	// Watchers (a TUI that /resumed this session) connect here: we stream events out, and take
-	// queued messages and aborts in. One JSON object per line each way.
+	// queued messages, answers and aborts in. One JSON object per line each way.
 	const watchers = new Set<Socket>();
 	const queued: { d: string; id?: string }[] = [];
 	const send = (o: unknown) => {
@@ -218,33 +215,38 @@ try {
 	// What a watcher that connects mid-message missed: the reply so far and the tool now running.
 	let partial = "";
 	let tool: string | undefined;
-	session.subscribe((e: any) => {
+	let last: { stopReason?: string; errorMessage?: string } | undefined;
+	listeners.add((e: any) => {
 		if (e.type === "message_start" && e.message?.role === "assistant") partial = "";
-		else if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") partial += e.assistantMessageEvent.delta;
-		else if (e.type === "message_end" && e.message?.role === "assistant") partial = "";
-		else if (e.type === "tool_execution_start") tool = `${e.toolName} ${JSON.stringify(e.args ?? {}).slice(0, 120)}`;
-		else if (e.type === "tool_execution_end") tool = undefined;
-	});
-	session.subscribe((e: any) => {
-		if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") send({ t: "text", d: e.assistantMessageEvent.delta });
-		else if (e.type === "message_start" && e.message?.role === "user") send({ t: "user", d: textOf(e.message) });
-		else if (e.type === "message_end" && e.message?.role === "assistant") send({ t: "end" });
-		else if (e.type === "tool_execution_start") send({ t: "tool", d: `${e.toolName} ${JSON.stringify(e.args ?? {}).slice(0, 120)}` });
-		else if (e.type === "tool_execution_end" && e.isError) send({ t: "tool_err", d: e.toolName });
+		else if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") {
+			partial += e.assistantMessageEvent.delta;
+			send({ t: "text", d: e.assistantMessageEvent.delta });
+		} else if (e.type === "message_start" && e.message?.role === "user") send({ t: "user", d: textOf(e.message) });
+		else if (e.type === "message_end" && e.message?.role === "assistant") {
+			partial = "";
+			last = e.message;
+			send({ t: "end" });
+		} else if (e.type === "tool_execution_start") {
+			tool = `${e.toolName} ${JSON.stringify(e.args ?? {}).slice(0, 120)}`;
+			send({ t: "tool", d: tool });
+		} else if (e.type === "tool_execution_end") {
+			tool = undefined;
+			if (e.isError) send({ t: "tool_err", d: e.toolName });
+		} else if (e.type === "agent_end") dropAsks();
 	});
 	const server = createServer((c) => {
 		if (partial) c.write(`${JSON.stringify({ t: "text", d: partial })}\n`);
 		if (tool) c.write(`${JSON.stringify({ t: "tool", d: tool })}\n`);
-		for (const a of asks.values()) c.write(`${JSON.stringify({ t: "ask", ...a.ask })}\n`);
+		for (const { timer: _, ...a } of asks.values()) c.write(`${JSON.stringify({ t: "ask", ...a })}\n`);
 		watchers.add(c);
 		c.on("close", () => watchers.delete(c));
 		c.on("error", () => watchers.delete(c));
-		let buf = "";
+		let cbuf = "";
 		c.on("data", (d) => {
-			buf += d;
-			for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
-				const line = buf.slice(0, i);
-				buf = buf.slice(i + 1);
+			cbuf += d;
+			for (let i = cbuf.indexOf("\n"); i >= 0; i = cbuf.indexOf("\n")) {
+				const line = cbuf.slice(0, i);
+				cbuf = cbuf.slice(i + 1);
 				let m: { t: string; d?: string; id?: string; value?: unknown };
 				try {
 					m = JSON.parse(line);
@@ -252,7 +254,7 @@ try {
 					continue;
 				}
 				if (m.t === "answer" && m.id) answer(m.id, m.value);
-				else if (m.t === "abort") void (dropAsks(), session.abort()).then(() => finish("stopped"));
+				else if (m.t === "abort") void stop("watcher pressed Esc");
 				else if (m.t === "msg" && m.d) {
 					log_("queued from watcher", JSON.stringify(m.d));
 					// Run after the current prompt, in order. One that arrives after the last is never confirmed
@@ -269,21 +271,28 @@ try {
 		server.close();
 		rmSync(run.sock!, { force: true });
 	};
+
+	const state = await withTimeout(rpc({ type: "get_state" }), 60_000);
+	run.name = state.sessionName ?? run.name;
 	writeRun(dir, run);
 
-	log_("prompting", JSON.stringify(msg), "model", session.model?.id);
-	const before = session.messages.length;
-	await session.prompt(msg);
-	while (queued.length) {
-		const next = queued.shift()!;
-		if (next.id) send({ t: "took", id: next.id });
-		await session.prompt(next.d);
-	}
+	/** One prompt to the end of its run. False if an extension refused it. */
+	const prompt = async (text: string) => {
+		const settled = next((e) => e.type === "agent_settled");
+		const { disposition } = await rpc({ type: "prompt", message: text });
+		if (disposition === "handled") return false;
+		await settled;
+		return true;
+	};
+	log_("prompting", JSON.stringify(msg), "model", state.model?.id);
 	// An extension can swallow the prompt (pi-sync does when another device holds the conversation's lease).
-	const last = session.messages.at(-1);
-	if (session.messages.length === before)
-		await finish("error", "prompt was not sent: an extension refused it (another device may be running this conversation)");
-	else await finish(last?.stopReason === "error" ? "error" : "done", last?.errorMessage);
+	if (!(await prompt(msg))) await finish("error", "prompt was not sent: an extension refused it (another device may be running this conversation)");
+	while (queued.length && !finished) {
+		const q = queued.shift()!;
+		if (q.id) send({ t: "took", id: q.id });
+		await prompt(q.d);
+	}
+	await finish(last?.stopReason === "error" ? "error" : "done", last?.stopReason === "error" ? last.errorMessage : undefined);
 } catch (e) {
 	log_("failed", e);
 	await finish("error", String((e as Error)?.message ?? e));
