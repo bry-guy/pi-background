@@ -14,7 +14,9 @@ Install [pi-keepalive](https://github.com/bry-guy/pi-keepalive) too if you want 
 
 - **Switch away while a turn is running** (`/resume`, `/new`, `/project`): the turn keeps going in the background. You see `Running "<session>" in background…`, and the footer shows `bg: N running`.
 - **Go back to it** with `/resume`: you watch it live. A status says "background session running", messages you type are queued and picked up by the run, and Esc stops it. When the turn ends, it's a normal session again.
+- **A background run that needs you waits for you.** When an extension asks something (a permission gate, `ask_user_question`, pi-sync's "take it over?"), the turn pauses. Every open pi gets a notice, `"<session>" is waiting on you: <question>`, and the footer shows `bg: N running, M waiting on you`. Answer it from wherever you are with `/bg`, or `/resume` the session and answer it there. Esc leaves it waiting. There is no timeout, and with pi-keepalive the machine may sleep while it waits.
 - `/bg <message>`: send a message and leave in one step.
+- `/bg`: answer what background runs are waiting on.
 - `/bg list`, `/bg stop`: housekeeping.
 
 Moving a turn mid-step restarts that step; the runner tells the model it was moved.
@@ -26,7 +28,8 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 - **One turn per run.** The runner runs a single turn (plus any messages queued while you watch), then saves and exits.
 - **Watching.** The runner streams events over `~/.pi/agent/background/<pid>.sock`; the TUI shows them under the transcript and reloads the session when the run ends. On SIGTERM it aborts the turn first, so the partial turn is saved.
 - **Run records.** Runs are recorded in `~/.pi/agent/background/<pid>.json`, with a log next to each record.
-- **Extensions can tell.** Extensions see `PI_BACKGROUND=1` and `hasUI=false` inside a runner.
+- **Dialogs.** The runner gives extensions a UI whose dialogs (select, confirm, input, editor) are forwarded over the socket and recorded in the run record (`waiting`); the first TUI to answer wins. Other UI calls (widgets, status, custom components) do nothing. Messages you type while watching are confirmed by the run when it starts them; any it never took are sent from your TUI once the run ends.
+- **Extensions can tell.** Extensions see `PI_BACKGROUND=1` inside a runner, and `hasUI=true` because their dialogs reach you.
 
 ## Limits
 
@@ -34,6 +37,8 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 - Background runs stop on sleep or shutdown. pi-keepalive prevents idle sleep only.
 - A plain `pi` without this extension ignores the lock. With it, a pi that opens a session another process is writing (e.g. `pi -c`) refuses to send until you `/resume` it.
 - Projects whose project-local resources aren't trusted run without them; the runner can't show the trust prompt.
+- Extensions' fully custom UI components (`ctx.ui.custom`) get no answer in a background run.
+- The runner loads pi's built-in extensions from pi's `dist/extensions/index.js`, which pi doesn't export; a pi release that moves it breaks background runs until this is updated.
 - pi-sync: background turns hold the conversation's lease and are pushed when they finish. Enrolling background-only sessions, and not releasing a running turn's lease from another local pi, need pi-sync with the `bg-enroll-lease` fix. If another device holds the lease, the run ends as an error.
 
 ## Test
