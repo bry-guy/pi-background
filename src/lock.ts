@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { linkSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 
 /** Who has a session file open. Pi core and pi-sync don't lock session files, so every writer must honor this. */
@@ -24,20 +24,57 @@ export function alive(pid: number): boolean {
 
 /** Current live holder, or undefined. A lock left by a dead process on this host is removed. */
 export function holder(file: string): Holder | undefined {
-	let h: Holder;
-	try {
-		h = JSON.parse(readFileSync(lockPath(file), "utf8"));
-	} catch {
-		return undefined;
-	}
-	if (h.host === hostname() && !alive(h.pid)) {
-		// shortcut: check-then-unlink can race with a second reclaimer; fine for one user's local processes.
+	for (let i = 0; i < 3; i++) {
+		let raw: string;
+		let h: Holder;
 		try {
-			unlinkSync(lockPath(file));
-		} catch {}
-		return undefined;
+			raw = readFileSync(lockPath(file), "utf8");
+			h = JSON.parse(raw);
+		} catch {
+			return undefined;
+		}
+		if (h.host !== hostname() || alive(h.pid)) return h;
+		reclaim(file, raw);
 	}
-	return h;
+	return undefined;
+}
+
+const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Removes the lock only if it still holds `seen` (a dead holder's), under a short-lived `<lock>.reclaim` mutex:
+ * two processes reclaiming at once would otherwise let the second delete the lock the first just took.
+ */
+export function reclaim(file: string, seen: string): void {
+	const mutex = `${lockPath(file)}.reclaim`;
+	const tmp = `${mutex}.${process.pid}`;
+	writeFileSync(tmp, String(process.pid));
+	try {
+		for (let i = 0; i < 40; i++) {
+			try {
+				linkSync(tmp, mutex);
+			} catch (e) {
+				if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+				// The mutex is held for a few syscalls; one older than 5s belongs to a process that died holding it.
+				try {
+					if (Date.now() - statSync(mutex).mtimeMs > 5000) unlinkSync(mutex);
+				} catch {}
+				sleep(5);
+				continue;
+			}
+			try {
+				if (readFileSync(lockPath(file), "utf8") === seen) unlinkSync(lockPath(file));
+			} catch {
+			} finally {
+				unlinkSync(mutex);
+			}
+			return;
+		}
+	} finally {
+		try {
+			unlinkSync(tmp);
+		} catch {}
+	}
 }
 
 /** Take the lock, or report who holds it. Re-acquiring a lock this process already holds succeeds. */
