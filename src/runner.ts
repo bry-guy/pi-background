@@ -137,7 +137,7 @@ try {
 	// Watchers (a TUI that /resumed this session) connect here: we stream events out, and take
 	// queued messages and aborts in. One JSON object per line each way.
 	const watchers = new Set<Socket>();
-	const queued: string[] = [];
+	const queued: { d: string; id?: string }[] = [];
 	const send = (o: unknown) => {
 		const line = `${JSON.stringify(o)}\n`;
 		for (const w of watchers) w.write(line);
@@ -171,7 +171,7 @@ try {
 			for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
 				const line = buf.slice(0, i);
 				buf = buf.slice(i + 1);
-				let m: { t: string; d?: string };
+				let m: { t: string; d?: string; id?: string };
 				try {
 					m = JSON.parse(line);
 				} catch {
@@ -180,9 +180,9 @@ try {
 				if (m.t === "abort") void session.abort().then(() => finish("stopped"));
 				else if (m.t === "msg" && m.d) {
 					log_("queued from watcher", JSON.stringify(m.d));
-					// Mid-run messages join the loop like a TUI follow-up; late ones run after it.
-					if (session.isStreaming) void session.followUp(m.d);
-					else queued.push(m.d);
+					// Run after the current prompt, in order. One that arrives after the last is never confirmed
+					// ("took"), and the watcher sends it again itself once this run lets go of the session.
+					queued.push({ d: m.d, id: m.id });
 				}
 			}
 		});
@@ -199,7 +199,11 @@ try {
 	log_("prompting", JSON.stringify(msg), "model", session.model?.id);
 	const before = session.messages.length;
 	await session.prompt(msg);
-	while (queued.length) await session.prompt(queued.shift()!);
+	while (queued.length) {
+		const next = queued.shift()!;
+		if (next.id) send({ t: "took", id: next.id });
+		await session.prompt(next.d);
+	}
 	// An extension can swallow the prompt (pi-sync does when another device holds the conversation's lease).
 	const last = session.messages.at(-1);
 	if (session.messages.length === before)

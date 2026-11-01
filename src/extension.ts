@@ -64,6 +64,8 @@ const notified = new Set<string>();
 let primed = false;
 // The live session's ui; a runner's exit can arrive after the session that started it was replaced.
 let liveUi: ExtensionContext["ui"] | undefined;
+// Messages queued to a background run that it never took (it finished first): sent here after the reload.
+let resend: { file: string; texts: string[] } | undefined;
 const warn = (text: string) => liveUi?.notify(text, "error");
 
 export default function (pi: ExtensionAPI) {
@@ -73,7 +75,7 @@ export default function (pi: ExtensionAPI) {
 	let stale: string | undefined;
 	let ui: ExtensionContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
-	let watching: { file: string; sock?: Socket; lines: string[]; stopInput: () => void } | undefined;
+	let watching: { file: string; sock?: Socket; lines: string[]; pending: Map<string, string>; stopInput: () => void } | undefined;
 
 	const render = () => {
 		if (!watching || !ui) return;
@@ -82,7 +84,7 @@ export default function (pi: ExtensionAPI) {
 
 	/** Stream the background run on `file` into this TUI; reload the session when the run lets go of it. */
 	function watch(ctx: ExtensionContext, file: string) {
-		const w: NonNullable<typeof watching> = { file, lines: [], stopInput: () => {} };
+		const w: NonNullable<typeof watching> = { file, lines: [], pending: new Map(), stopInput: () => {} };
 		watching = w;
 		ctx.ui.setStatus(WATCH, "background session running");
 		w.stopInput = ctx.ui.onTerminalInput((data) => {
@@ -105,7 +107,7 @@ export default function (pi: ExtensionAPI) {
 			sock.on("data", (d) => {
 				buf += d;
 				for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
-					let m: { t: string; d?: string };
+					let m: { t: string; d?: string; id?: string };
 					try {
 						m = JSON.parse(buf.slice(0, i));
 					} catch {
@@ -117,6 +119,7 @@ export default function (pi: ExtensionAPI) {
 					else if (m.t === "tool") w.lines.push(`\n⚙ ${m.d}\n`);
 					else if (m.t === "tool_err") w.lines.push(`✗ ${m.d} failed\n`);
 					else if (m.t === "end") w.lines.push("\n");
+					else if (m.t === "took" && m.id) w.pending.delete(m.id);
 				}
 				render();
 			});
@@ -127,6 +130,7 @@ export default function (pi: ExtensionAPI) {
 			if (watching !== w) return;
 			await waitFree(file, 120_000);
 			if (watching !== w) return;
+			if (w.pending.size) resend = { file, texts: [...w.pending.values()] };
 			// Only a command context can switch sessions; switching to the same file reloads what the runner wrote.
 			pi.sendUserMessage("/bg-reload", { expandPromptTemplates: true });
 		};
@@ -192,7 +196,9 @@ export default function (pi: ExtensionAPI) {
 		const file = ctx.sessionManager.getSessionFile();
 		if (watching && watching.file === file) {
 			// Like typing during a turn: the message is queued and the background run picks it up.
-			watching.sock?.write(`${JSON.stringify({ t: "msg", d: event.text })}\n`);
+			const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			watching.pending.set(id, event.text);
+			watching.sock?.write(`${JSON.stringify({ t: "msg", d: event.text, id })}\n`);
 			watching.lines.push(`\n⏳ queued: ${event.text}\n`);
 			render();
 			return { action: "handled" };
@@ -236,7 +242,15 @@ export default function (pi: ExtensionAPI) {
 		description: "(internal) reload a session after its background turn ends",
 		handler: async (_args, ctx) => {
 			const file = ctx.sessionManager.getSessionFile();
-			if (file) await ctx.switchSession(file);
+			if (!file) return;
+			const texts = resend?.file === file ? resend.texts : [];
+			resend = undefined;
+			await ctx.switchSession(file, {
+				withSession: async (c) => {
+					if (texts.length) c.ui.notify(`The background run ended before taking ${texts.length > 1 ? `${texts.length} queued messages` : "your queued message"}; sending ${texts.length > 1 ? "them" : "it"} here.`, "info");
+					for (const [i, text] of texts.entries()) await c.sendUserMessage(text, i ? { deliverAs: "followUp" } : undefined);
+				},
+			});
 		},
 	});
 
