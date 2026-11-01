@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent";
 import { acquire, holder, release, waitFree } from "./lock.ts";
-import { listRuns, type Run } from "./registry.ts";
+import { type Ask, listRuns, type Run } from "./registry.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
 const STATUS = "pi-background";
@@ -64,6 +64,36 @@ const notified = new Set<string>();
 let primed = false;
 // The live session's ui; a runner's exit can arrive after the session that started it was replaced.
 let liveUi: ExtensionContext["ui"] | undefined;
+// Questions from background runs already announced (by id), so each is notified once per pi process.
+const announced = new Set<string>();
+
+/**
+ * Shows a background run's question here and returns the answer, or undefined if dismissed (Esc), which leaves
+ * the run waiting. Confirm goes through a select so Esc can mean "later" rather than "no".
+ */
+async function showAsk(ui: ExtensionContext["ui"], a: Ask, from: string, signal?: AbortSignal): Promise<{ value: unknown } | undefined> {
+	const title = `${from} asks: ${a.title}`;
+	if (a.method === "confirm") {
+		const c = await ui.select(a.message ? `${title}\n${a.message}` : title, ["Yes", "No"], { signal });
+		return c === undefined ? undefined : { value: c === "Yes" };
+	}
+	const v =
+		a.method === "select"
+			? await ui.select(title, a.options ?? [], { signal })
+			: a.method === "input"
+				? await ui.input(title, a.placeholder, { signal })
+				: await ui.editor(title, a.prefill);
+	return v === undefined ? undefined : { value: v };
+}
+
+/** Sends an answer to a run's socket (a short connection of its own). */
+function sendAnswer(sock: string, id: string, value: unknown): Promise<void> {
+	return new Promise((resolve) => {
+		const c = connect(sock, () => c.end(`${JSON.stringify({ t: "answer", id, value })}\n`, () => resolve()));
+		c.on("error", () => resolve());
+	});
+}
+
 // Messages queued to a background run that it never took (it finished first): sent here after the reload.
 let resend: { file: string; texts: string[] } | undefined;
 const warn = (text: string) => liveUi?.notify(text, "error");
@@ -75,7 +105,9 @@ export default function (pi: ExtensionAPI) {
 	let stale: string | undefined;
 	let ui: ExtensionContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
-	let watching: { file: string; sock?: Socket; lines: string[]; pending: Map<string, string>; stopInput: () => void } | undefined;
+	let watching:
+		| { file: string; sock?: Socket; lines: string[]; pending: Map<string, string>; asking: Map<string, AbortController>; stopInput: () => void }
+		| undefined;
 
 	const render = () => {
 		if (!watching || !ui) return;
@@ -84,7 +116,7 @@ export default function (pi: ExtensionAPI) {
 
 	/** Stream the background run on `file` into this TUI; reload the session when the run lets go of it. */
 	function watch(ctx: ExtensionContext, file: string) {
-		const w: NonNullable<typeof watching> = { file, lines: [], pending: new Map(), stopInput: () => {} };
+		const w: NonNullable<typeof watching> = { file, lines: [], pending: new Map(), asking: new Map(), stopInput: () => {} };
 		watching = w;
 		ctx.ui.setStatus(WATCH, "background session running");
 		w.stopInput = ctx.ui.onTerminalInput((data) => {
@@ -107,7 +139,7 @@ export default function (pi: ExtensionAPI) {
 			sock.on("data", (d) => {
 				buf += d;
 				for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
-					let m: { t: string; d?: string; id?: string };
+					let m: { t: string; d?: string; id?: string; level?: string } & Partial<Ask>;
 					try {
 						m = JSON.parse(buf.slice(0, i));
 					} catch {
@@ -120,6 +152,20 @@ export default function (pi: ExtensionAPI) {
 					else if (m.t === "tool_err") w.lines.push(`✗ ${m.d} failed\n`);
 					else if (m.t === "end") w.lines.push("\n");
 					else if (m.t === "took" && m.id) w.pending.delete(m.id);
+					else if (m.t === "notify" && m.d) ctx.ui.notify(m.d, m.level === "error" ? "error" : m.level === "warning" ? "warning" : "info");
+					else if (m.t === "ask" && m.id && !w.asking.has(m.id)) {
+						// The run is paused on this question: ask it here, like the session's own dialog.
+						const a = m as Ask;
+						const ctl = new AbortController();
+						w.asking.set(a.id, ctl);
+						w.lines.push(`\n? ${a.title}\n`);
+						void showAsk(ctx.ui, a, "Background run", ctl.signal)
+							.then((got) => {
+								if (got && watching === w && !ctl.signal.aborted) sock.write(`${JSON.stringify({ t: "answer", id: a.id, value: got.value })}\n`);
+							})
+							.catch(() => {})
+							.finally(() => w.asking.delete(a.id));
+					} else if (m.t === "asked" && m.id) w.asking.get(m.id)?.abort(); // answered elsewhere
 				}
 				render();
 			});
@@ -141,16 +187,45 @@ export default function (pi: ExtensionAPI) {
 	function unwatch() {
 		if (!watching) return;
 		watching.stopInput();
+		for (const ctl of watching.asking.values()) ctl.abort();
 		watching.sock?.destroy();
 		watching = undefined;
 		ui?.ui.setWidget(WATCH, undefined);
 		ui?.ui.setStatus(WATCH, undefined);
 	}
 
+	/** /bg with no message: answer what background runs are waiting on, from here, one after another. */
+	async function answerWaiting(ctx: ExtensionContext) {
+		const open = listRuns(runsDir()).flatMap((r) =>
+			r.status === "running" && r.sock ? (r.waiting ?? []).map((a) => ({ r, a, label: `${r.name}: ${a.title}` })) : [],
+		);
+		if (!open.length) return ctx.ui.notify("Usage: /bg <message>. No background run is waiting on you.", "info");
+		let item = open[0]!;
+		if (open.length > 1) {
+			const c = await ctx.ui.select("Waiting on you", open.map((o) => o.label));
+			const found = open.find((o) => o.label === c);
+			if (!found) return;
+			item = found;
+		}
+		const got = await showAsk(ctx.ui, item.a, `"${item.r.name}"`);
+		if (!got) return; // Esc: still waiting
+		await sendAnswer(item.r.sock!, item.a.id, got.value);
+		ctx.ui.notify(`Answered; "${item.r.name}" continues in the background.`, "info");
+	}
+
 	const poll = () => {
 		const runs = listRuns(runsDir());
-		const running = runs.filter((r) => r.status === "running" || r.status === "waiting").length;
-		ui?.ui.setStatus(STATUS, running ? `bg: ${running} running` : undefined);
+		const live = runs.filter((r) => r.status === "running" || r.status === "waiting");
+		const blocked = live.filter((r) => r.waiting?.length);
+		ui?.ui.setStatus(STATUS, live.length ? `bg: ${live.length} running${blocked.length ? `, ${blocked.length} waiting on you` : ""}` : undefined);
+		for (const r of blocked) {
+			for (const a of r.waiting!) {
+				if (announced.has(a.id)) continue;
+				announced.add(a.id);
+				// Watching it already shows the question.
+				if (primed && watching?.file !== r.file) ui?.ui.notify(`"${r.name}" is waiting on you: ${a.title}\n/bg to answer here, or /resume it.`, "warning");
+			}
+		}
 		for (const r of runs) {
 			const key = `${r.pid}:${r.startedAt}`;
 			if (r.status === "running" || r.status === "waiting" || notified.has(key)) continue;
@@ -275,7 +350,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const file = ctx.sessionManager.getSessionFile();
 			if (!file) return ctx.ui.notify("This session isn't saved to a file, so it can't run in the background.", "error");
-			if (!arg) return ctx.ui.notify("Usage: /bg <message>", "warning");
+			if (!arg) return answerWaiting(ctx);
 			if (!ctx.isIdle()) return ctx.ui.notify("Busy. Just switch sessions; the turn moves to the background.", "warning");
 			// pi writes a new session's file only after the first reply; the runner needs it to exist.
 			if (!existsSync(file)) writeFileSync(file, `${JSON.stringify(ctx.sessionManager.getHeader())}\n`);
