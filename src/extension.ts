@@ -29,12 +29,12 @@ const label = (r: Run) => `${r.name}  ${r.waiting?.length ? "waiting on you" : r
  */
 function piPackageDir(): string {
 	const own = getPackageDir();
-	if (existsSync(join(own, "dist/index.js"))) return own;
+	if (existsSync(join(own, "package.json"))) return own;
 	const bin = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
 	// npm installs link into the package itself; Homebrew's pi is a wrapper next to libexec/.
 	for (let d = dirname(bin); d !== "/"; d = dirname(d)) {
 		for (const c of [d, join(d, "libexec/lib/node_modules/@earendil-works/pi-coding-agent")])
-			if (existsSync(join(c, "dist/index.js")) && existsSync(join(c, "package.json"))) return c;
+			if (existsSync(join(c, "package.json"))) return c;
 	}
 	return own;
 }

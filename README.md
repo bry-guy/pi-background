@@ -24,11 +24,11 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 ## How it works
 
 - **Lock.** Every pi with this extension holds a lock (`<session>.jsonl.lock`, recording pid, host and role) on the session it has open. Pi core and pi-sync don't lock session files, so this is what stops two processes writing to one session.
-- **Runner.** Each background run is a detached `node src/runner.ts` process. It builds the session the way pi's CLI does (`createAgentSessionServices` and `createAgentSessionFromServices` from the installed pi), so it loads the same settings, extensions, packages, skills and AGENTS.md as your TUI.
+- **Runner.** Each background run is a detached `node src/runner.ts` process that drives `pi --mode rpc --session <file>` (the installed pi's own CLI). So the session loads exactly what your TUI loads (settings, extensions including pi's built-ins, packages, skills, AGENTS.md, enabledModels), and the runner uses only pi's public interfaces.
 - **One turn per run.** The runner runs a single turn (plus any messages queued while you watch), then saves and exits.
 - **Watching.** The runner streams events over `~/.pi/agent/background/<pid>.sock`; the TUI shows them under the transcript and reloads the session when the run ends. On SIGTERM it aborts the turn first, so the partial turn is saved.
 - **Run records.** Runs are recorded in `~/.pi/agent/background/<pid>.json`, with a log next to each record.
-- **Dialogs.** The runner gives extensions a UI whose dialogs (select, confirm, input, editor) are forwarded over the socket and recorded in the run record (`waiting`); the first TUI to answer wins. Other UI calls (widgets, status, custom components) do nothing. Messages you type while watching are confirmed by the run when it starts them; any it never took are sent from your TUI once the run ends.
+- **Dialogs.** Extension dialogs (select, confirm, input, editor) arrive from pi's RPC mode and are forwarded over the socket and recorded in the run record (`waiting`); the first TUI to answer wins. Notifications are shown to watchers; other UI calls (widgets, status, custom components) do nothing. Messages you type while watching are confirmed by the run when it starts them; any it never took are sent from your TUI once the run ends.
 - **Extensions can tell.** Extensions see `PI_BACKGROUND=1` inside a runner, and `hasUI=true` because their dialogs reach you.
 
 ## Limits
@@ -38,7 +38,6 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 - A plain `pi` without this extension ignores the lock. With it, a pi that opens a session another process is writing (e.g. `pi -c`) refuses to send until you `/resume` it.
 - Projects whose project-local resources aren't trusted run without them; the runner can't show the trust prompt.
 - Extensions' fully custom UI components (`ctx.ui.custom`) get no answer in a background run.
-- The runner loads pi's built-in extensions from pi's `dist/extensions/index.js`, which pi doesn't export; if a pi release moves it, background runs go on without pi's built-in extensions (mcp, tool-search, …) and say so in the run log.
 - pi-sync: background turns hold the conversation's lease and are pushed when they finish. Enrolling background-only sessions, and not releasing a running turn's lease from another local pi, need pi-sync with the `bg-enroll-lease` fix. If another device holds the lease, the run ends as an error.
 
 ## Test
