@@ -31,6 +31,22 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 - **Dialogs.** Extension dialogs (select, confirm, input, editor) arrive from pi's RPC mode and are forwarded over the socket and recorded in the run record (`waiting`); the first TUI to answer wins. Notifications are shown to watchers; other UI calls (widgets, status, custom components) do nothing. Messages you type while watching are confirmed by the run when it starts them; any it never took are sent from your TUI once the run ends.
 - **Extensions can tell.** Extensions see `PI_BACKGROUND=1` inside a runner, and `hasUI=true` because their dialogs reach you.
 
+## Stall guard
+
+A run that makes no progress for 10 minutes is stopped and listed as `stalled`. The runner touches
+`<agentDir>/background/<pid>.beat` on every event from pi (and every 30 s while it waits on you, so waiting isn't a
+stall). A per-run [monit](https://mmonit.com/monit/) check (`brew install monit`) watches that file and sends SIGTERM
+once it's 10 minutes old, SIGKILL at 13. monit runs as your own daemon with its own config in
+`<agentDir>/background/monit/` and is started by the first run that needs it. Without monit, runs have no stall guard
+(logged).
+
+## For other extensions
+
+`globalThis[Symbol.for("pi-background.v1")]`:
+- `start({ cwd, msg, env })` creates a new session in `cwd`, runs `msg` in it in the background with extra `env`, and
+  returns `{ file, pid }`. pi-projects' `role_agent` uses it with `PI_ROLE`.
+- `runs()` lists runs (`Run` in `src/registry.ts`).
+
 ## Limits
 
 - A turn that's running can't move between processes. Moving or stopping one loses only the step that was in flight; the next turn starts with `continue`.

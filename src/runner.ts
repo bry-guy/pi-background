@@ -9,6 +9,7 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acquire, release, waitFree } from "./lock.ts";
 import { type Ask, type Run, writeRun } from "./registry.ts";
+import { heartbeat, STALL_MS, watchWithMonit } from "./stall.ts";
 
 const [pkgDir, file, msg, log] = process.argv.slice(2);
 if (!pkgDir || !file || !msg) {
@@ -56,6 +57,10 @@ if (!(await waitFree(file, 120_000))) giveUp("session stayed locked for 2 minute
 const got = acquire(file, "bg");
 if (!got.ok) giveUp(`session locked by pid ${got.heldBy.pid} (${got.heldBy.role})`);
 writeRun(dir, run);
+const hb = heartbeat(dir, process.pid);
+const unwatch = watchWithMonit(dir, process.pid, hb.file, log_);
+// Waiting on you is not a stall: keep the heartbeat going while a question is open.
+setInterval(() => asks.size && hb.beat(true), 30_000).unref();
 
 let closeSocket = () => {};
 const textOf = (m: { content?: unknown }) =>
@@ -140,6 +145,8 @@ async function finish(status: Run["status"], error?: string) {
 		if (!(await withTimeout(exited, 15_000).then(() => true, () => false))) child.kill("SIGKILL");
 	}
 	closeSocket();
+	unwatch?.();
+	hb.remove();
 	release(file);
 	writeRun(dir, { ...run, waiting: undefined, status, error, endedAt: new Date().toISOString() });
 	log_("finished", status, error ?? "");
@@ -152,15 +159,16 @@ const withTimeout = <T>(p: Promise<T>, ms: number) =>
 let stopping = false;
 async function stop(why: string) {
 	if (finished || stopping) return;
-	stopping = true; // the turn ending under the abort is ours to report, as "stopped"
-	log_(why, "- aborting so the partial turn is saved");
+	stopping = true; // the turn ending under the abort is ours to report, as "stopped" (or "stalled")
+	const stalled = hb.age() >= STALL_MS;
+	log_(why, stalled ? "- no progress for 10 minutes (stalled)" : "", "- aborting so the partial turn is saved");
 	dropAsks();
 	try {
 		await withTimeout(rpc({ type: "abort" }), 15_000);
 	} catch (e) {
 		log_("abort failed", e);
 	}
-	await finish("stopped");
+	await finish(stalled ? "stalled" : "stopped", stalled ? "no progress for 10 minutes" : undefined);
 }
 for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const) process.on(sig, () => void stop(`got ${sig}`));
 
@@ -179,6 +187,7 @@ try {
 	});
 	let buf = "";
 	child.stdout!.on("data", (d) => {
+		hb.beat();
 		buf += d;
 		for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
 			const line = buf.slice(0, i);

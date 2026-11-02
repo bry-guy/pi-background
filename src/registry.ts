@@ -10,7 +10,7 @@ export type Run = {
 	msg: string;
 	log: string;
 	startedAt: string;
-	status: "waiting" | "running" | "done" | "error" | "stopped" | "died";
+	status: "waiting" | "running" | "done" | "error" | "stopped" | "stalled" | "died";
 	endedAt?: string;
 	error?: string;
 	/** Unix socket watchers connect to while the run is live. */

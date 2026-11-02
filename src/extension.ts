@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, openSync, realpathSync, writeFileSync } from "no
 import { connect, type Socket } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { acquire, holder, release, waitFree } from "./lock.ts";
 import { type Ask, listRuns, type Run } from "./registry.ts";
 
@@ -40,7 +40,7 @@ function piPackageDir(): string {
 }
 
 /** Start a detached runner for one turn on `file`. It waits for this process to release the session lock. */
-function spawnRunner(file: string, msg: string, cwd: string, warn: (text: string) => void): void {
+function spawnRunner(file: string, msg: string, cwd: string, warn: (text: string) => void, env: Record<string, string> = {}): number | undefined {
 	const dir = runsDir();
 	mkdirSync(dir, { recursive: true });
 	const log = join(dir, `${Date.now()}-${basename(file, ".jsonl")}.log`);
@@ -49,13 +49,14 @@ function spawnRunner(file: string, msg: string, cwd: string, warn: (text: string
 		cwd,
 		detached: true,
 		stdio: ["ignore", out, out],
-		env: { ...process.env, PI_BACKGROUND: "1" },
+		env: { ...process.env, ...env, PI_BACKGROUND: "1" },
 	});
 	// A runner that dies before writing its run record would otherwise vanish without a trace.
 	child.on("exit", (code) => {
 		if (code && !listRuns(dir).some((r) => r.pid === child.pid)) warn(`Background run failed to start (exit ${code}). Log: ${log}`);
 	});
 	child.unref();
+	return child.pid;
 }
 
 // pi re-runs the extension factory on every session switch, so state that must survive a switch lives here.
@@ -97,6 +98,20 @@ function sendAnswer(sock: string, id: string, value: unknown): Promise<void> {
 // Messages queued to a background run that it never took (it finished first): sent here after the reload.
 let resend: { file: string; texts: string[] } | undefined;
 const warn = (text: string) => liveUi?.notify(text, "error");
+
+/** For other extensions (pi-projects' role_agent): start a new session in the background. */
+(globalThis as any)[Symbol.for("pi-background.v1")] = {
+	/** Creates a session in cwd, runs msg in it detached, and returns its file and runner pid. */
+	start({ cwd, msg, env }: { cwd: string; msg: string; env?: Record<string, string> }) {
+		const sm = SessionManager.create(cwd);
+		const file = sm.getSessionFile();
+		if (!file) throw new Error("pi did not assign a session file");
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, `${JSON.stringify(sm.getHeader())}\n`);
+		return { file, pid: spawnRunner(file, msg, cwd, warn, env) };
+	},
+	runs: () => listRuns(runsDir()),
+};
 
 export default function (pi: ExtensionAPI) {
 	if (process.env.PI_BACKGROUND) return; // the runner locks its own session; don't nest
