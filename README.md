@@ -16,6 +16,7 @@ Install [pi-keepalive](https://github.com/bry-guy/pi-keepalive) too if you want 
 - **Go back to it** with `/resume`: you watch it live. A status says "background session running", messages you type are queued and picked up by the run, and Esc stops it. When the turn ends, it's a normal session again.
 - **A background run that needs you waits for you.** When an extension asks something (a permission gate, `ask_user_question`, pi-sync's "take it over?"), the turn pauses. Every open pi gets a notice, `"<session>" is waiting on you: <question>`, and the footer shows `bg: N running, M waiting on you`. Answer it from wherever you are with `/bg`, or `/resume` the session and answer it there. Esc leaves it waiting. There is no timeout, and with pi-keepalive the machine may sleep while it waits.
 - `/bg <message>`: send a message and leave in one step.
+- `/new <message>`: start a new session and send `<message>` there (pi's own `/new` ignores text after it).
 - `/bg`: answer what background runs are waiting on.
 - `/bg list`, `/bg stop`: housekeeping.
 
