@@ -34,8 +34,8 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 ## Stall guard
 
 A run that makes no progress for 10 minutes is stopped and listed as `stalled`. The runner touches
-`<agentDir>/background/<pid>.beat` on every event from pi (and every 30 s while it waits on you, so waiting isn't a
-stall). A per-run [monit](https://mmonit.com/monit/) check (`brew install monit`) watches that file and sends SIGTERM
+`<agentDir>/background/<pid>.beat` on every event from pi (and every 30 s while it waits on you or a tool call is still running, so waiting or a
+long quiet build isn't a stall; a single tool call counts as progress for at most 2 hours). A per-run [monit](https://mmonit.com/monit/) check (`brew install monit`) watches that file and sends SIGTERM
 once it's 10 minutes old, SIGKILL at 13. monit runs as your own daemon with its own config in
 `<agentDir>/background/monit/` and is started by the first run that needs it. Without monit, runs have no stall guard
 (logged).

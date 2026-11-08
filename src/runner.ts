@@ -59,8 +59,14 @@ if (!got.ok) giveUp(`session locked by pid ${got.heldBy.pid} (${got.heldBy.role}
 writeRun(dir, run);
 const hb = heartbeat(dir, process.pid);
 const unwatch = watchWithMonit(dir, process.pid, hb.file, log_);
-// Waiting on you is not a stall: keep the heartbeat going while a question is open.
-setInterval(() => asks.size && hb.beat(true), 30_000).unref();
+// Waiting on you is not a stall, and neither is a quiet tool call (a build, a sleep) up to TOOL_MAX_MS:
+// keep the heartbeat going while either is open.
+const TOOL_MAX_MS = 2 * 60 * 60_000;
+const toolsRunning = new Map<string, number>();
+setInterval(() => {
+	const now = Date.now();
+	if (asks.size || [...toolsRunning.values()].some((t) => now - t < TOOL_MAX_MS)) hb.beat(true);
+}, 30_000).unref();
 
 let closeSocket = () => {};
 const textOf = (m: { content?: unknown }) =>
@@ -227,6 +233,10 @@ try {
 	let partial = "";
 	let tool: string | undefined;
 	let last: { stopReason?: string; errorMessage?: string } | undefined;
+	listeners.add((e: any) => {
+		if (e.type === "tool_execution_start") toolsRunning.set(e.toolCallId, Date.now());
+		else if (e.type === "tool_execution_end") toolsRunning.delete(e.toolCallId);
+	});
 	listeners.add((e: any) => {
 		if (e.type === "message_start" && e.message?.role === "assistant") partial = "";
 		else if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") {
