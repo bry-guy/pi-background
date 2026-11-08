@@ -4,7 +4,7 @@ import { connect, type Socket } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir, SessionManager } from "@earendil-works/pi-coding-agent";
-import { acquire, holder, release, waitFree } from "./lock.ts";
+import { acquire, holder, mine, release, waitFree } from "./lock.ts";
 import { type Ask, listRuns, type Run } from "./registry.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
@@ -272,7 +272,7 @@ export default function (pi: ExtensionAPI) {
 		if (!file || held === file || !existsSync(file)) return; // no file yet: nobody else can be writing it
 		const got = acquire(file, "tui");
 		if (got.ok) held = file;
-		else if (got.heldBy.role !== "bg") {
+		else if (got.heldBy.role !== "bg" && !mine(got.heldBy)) {
 			stale = file;
 			ctx.ui.notify(
 				`This session is open in another pi (pid ${got.heldBy.pid}). Writing from both corrupts it.`,
@@ -299,6 +299,12 @@ export default function (pi: ExtensionAPI) {
 			if (held === file || !existsSync(file)) return { action: "continue" };
 		}
 		const h = holder(file);
+		if (mine(h)) {
+			// Our own lock, e.g. left from before an extension reload: never block ourselves.
+			held = file;
+			stale = undefined;
+			return { action: "continue" };
+		}
 		ctx.ui.notify(
 			h
 				? `Not sent: pid ${h.pid} (${h.role}) is writing this session. ${h.role === "bg" ? "/bg stop it or wait" : "Close it there"}, then /resume this session.`

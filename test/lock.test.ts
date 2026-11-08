@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { acquire, holder, lockPath, reclaim, release, waitFree } from "../src/lock.ts";
+import { acquire, holder, lockPath, mine, reclaim, release, waitFree } from "../src/lock.ts";
 
 const session = () => join(mkdtempSync(join(tmpdir(), "pibg-")), "s.jsonl");
 
@@ -64,4 +64,13 @@ test("a reclaim mutex left by a crashed process is cleared after 5s", () => {
 	writeFileSync(`${lockPath(f)}.reclaim`, "1");
 	utimesSync(`${lockPath(f)}.reclaim`, new Date(Date.now() - 10_000), new Date(Date.now() - 10_000));
 	assert.deepEqual(acquire(f, "tui"), { ok: true });
+});
+
+test("mine recognizes only this process's lock", () => {
+	const f = session();
+	acquire(f, "tui");
+	assert.equal(mine(holder(f)), true);
+	assert.equal(mine({ pid: process.pid, host: "elsewhere", role: "tui", startedAt: "" }), false);
+	assert.equal(mine(undefined), false);
+	release(f);
 });

@@ -7,6 +7,12 @@ export type Holder = { pid: number; host: string; role: "tui" | "bg"; startedAt:
 
 export const lockPath = (file: string) => `${file}.lock`;
 
+// Read once: macOS can change os.hostname() mid-process, which would orphan our own lock.
+const HOST = hostname();
+
+/** True if `h` is this process's own lock. */
+export const mine = (h: Holder | undefined) => h?.pid === process.pid && h.host === HOST;
+
 /** True if `pid` is running and is a node/pi process (a reused pid of another program counts as dead). */
 export function alive(pid: number): boolean {
 	try {
@@ -36,7 +42,7 @@ export function holder(file: string): Holder | undefined {
 		} catch {
 			return undefined;
 		}
-		if (h.host !== hostname() || alive(h.pid)) return h;
+		if (h.host !== HOST || alive(h.pid)) return h;
 		reclaim(file, raw);
 	}
 	return undefined;
@@ -82,7 +88,7 @@ export function reclaim(file: string, seen: string): void {
 
 /** Take the lock, or report who holds it. Re-acquiring a lock this process already holds succeeds. */
 export function acquire(file: string, role: Holder["role"]): { ok: true } | { ok: false; heldBy: Holder } {
-	const me: Holder = { pid: process.pid, host: hostname(), role, startedAt: new Date().toISOString() };
+	const me: Holder = { pid: process.pid, host: HOST, role, startedAt: new Date().toISOString() };
 	const tmp = `${lockPath(file)}.${process.pid}`;
 	writeFileSync(tmp, JSON.stringify(me));
 	try {
@@ -94,7 +100,7 @@ export function acquire(file: string, role: Holder["role"]): { ok: true } | { ok
 				if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
 			}
 			const h = holder(file);
-			if (h?.pid === process.pid && h.host === me.host) return { ok: true };
+			if (mine(h)) return { ok: true };
 			if (h) return { ok: false, heldBy: h };
 		}
 		const h = holder(file);
@@ -108,7 +114,7 @@ export function acquire(file: string, role: Holder["role"]): { ok: true } | { ok
 
 export function release(file: string): void {
 	const h = holder(file);
-	if (h?.pid === process.pid && h.host === hostname()) {
+	if (mine(h)) {
 		try {
 			unlinkSync(lockPath(file));
 		} catch {}
