@@ -54,7 +54,7 @@ once it's 10 minutes old, SIGKILL at 13. monit runs as your own daemon with its 
 - A plain `pi` without this extension ignores the lock. With it, a pi that opens a session another process is writing (e.g. `pi -c`) refuses to send until you `/resume` it.
 - Projects whose project-local resources aren't trusted run without them; the runner can't show the trust prompt.
 - Extensions' fully custom UI components (`ctx.ui.custom`) get no answer in a background run.
-- pi-sync: background turns hold the conversation's lease and are pushed when they finish. Enrolling background-only sessions, and not releasing a running turn's lease from another local pi, need pi-sync with the `bg-enroll-lease` fix. If another device holds the lease, the run ends as an error.
+- pi-sync: background turns hold the conversation's lease and are pushed when they finish. With a current pi-sync, background sessions sync like foreground ones. If another device holds the lease, the run ends as an error.
 
 ## Test
 
