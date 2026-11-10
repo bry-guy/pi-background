@@ -99,15 +99,22 @@ function sendAnswer(sock: string, id: string, value: unknown): Promise<void> {
 let resend: { file: string; texts: string[] } | undefined;
 const warn = (text: string) => liveUi?.notify(text, "error");
 
+/** Writes a new session file for cwd (header, plus a session_info entry when named) and returns its path. */
+export function newSessionFile(cwd: string, name?: string, sessionDir?: string): string {
+	const sm = SessionManager.create(cwd, sessionDir);
+	const file = sm.getSessionFile();
+	if (!file) throw new Error("pi did not assign a session file");
+	if (name?.trim()) sm.appendSessionInfo(name); // in memory only until the file exists
+	mkdirSync(dirname(file), { recursive: true });
+	writeFileSync(file, [sm.getHeader(), ...sm.getEntries()].map((e) => `${JSON.stringify(e)}\n`).join(""));
+	return file;
+}
+
 /** For other extensions (pi-projects' role_agent): start a new session in the background. */
 (globalThis as any)[Symbol.for("pi-background.v1")] = {
 	/** Creates a session in cwd, runs msg in it detached, and returns its file and runner pid. */
-	start({ cwd, msg, env }: { cwd: string; msg: string; env?: Record<string, string> }) {
-		const sm = SessionManager.create(cwd);
-		const file = sm.getSessionFile();
-		if (!file) throw new Error("pi did not assign a session file");
-		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, `${JSON.stringify(sm.getHeader())}\n`);
+	start({ cwd, msg, env, name }: { cwd: string; msg: string; env?: Record<string, string>; name?: string }) {
+		const file = newSessionFile(cwd, name);
 		return { file, pid: spawnRunner(file, msg, cwd, warn, env) };
 	},
 	runs: () => listRuns(runsDir()),
