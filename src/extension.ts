@@ -350,16 +350,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// pi's own /new matches only the bare command, so "/new <message>" lands here: start a new session and send it
-	// there (a turn still running here moves to the background as with any switch).
-	pi.registerCommand("new", {
-		description: "New session; /new <message> also sends <message> there",
-		handler: async (args, ctx) => {
-			const msg = args.trim();
-			await ctx.newSession(msg ? { withSession: async (c) => c.sendUserMessage(msg) } : undefined);
-		},
-	});
-
 	pi.registerCommand("bg", {
 		description: "Background sessions: /bg <message> | /bg (answer a waiting run) | /bg list | /bg stop",
 		handler: async (args, ctx) => {
