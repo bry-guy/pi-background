@@ -43,8 +43,8 @@ once it's 10 minutes old, SIGKILL at 13. monit runs as your own daemon with its 
 ## For other extensions
 
 `globalThis[Symbol.for("pi-background.v1")]`:
-- `start({ cwd, msg, env })` creates a new session in `cwd`, runs `msg` in it in the background with extra `env`, and
-  returns `{ file, pid }`. pi-projects' `role_agent` uses it with `PI_ROLE`.
+- `start({ cwd, msg, env, name })` creates a new session in `cwd` (named `name`, if given), runs `msg` in it in the
+  background with extra `env`, and returns `{ file, pid }`. pi-projects' `role_agent` uses it with `PI_ROLE`.
 - `runs()` lists runs (`Run` in `src/registry.ts`).
 
 ## Limits
