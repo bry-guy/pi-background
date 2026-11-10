@@ -21,3 +21,8 @@ test("an unnamed session file holds only the header", () => {
 	assert.equal(readFileSync(file, "utf8").trim().split("\n").length, 1);
 	assert.equal(SessionManager.open(file).getSessionName(), undefined);
 });
+
+test("stop() is false for a pid that is not a live run", () => {
+	const api = (globalThis as any)[Symbol.for("pi-background.v1")];
+	assert.equal(api.stop(2 ** 30), false);
+});
