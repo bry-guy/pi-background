@@ -118,6 +118,12 @@ export function newSessionFile(cwd: string, name?: string, sessionDir?: string):
 		return { file, pid: spawnRunner(file, msg, cwd, warn, env) };
 	},
 	runs: () => listRuns(runsDir()),
+	/** Stops a live run like /bg stop (SIGTERM; it ends as "stopped"). False when no live run has this pid. */
+	stop(pid: number) {
+		const r = listRuns(runsDir()).find((x) => x.pid === pid && (x.status === "running" || x.status === "waiting"));
+		if (r) process.kill(pid, "SIGTERM");
+		return !!r;
+	},
 };
 
 export default function (pi: ExtensionAPI) {
