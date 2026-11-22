@@ -5,11 +5,13 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { acquire, holder, mine, release, waitFree } from "./lock.ts";
-import { type Ask, listRuns, type Run } from "./registry.ts";
+import { type Ask, latestActivity, listRuns, type Run } from "./registry.ts";
+import { widgetLines } from "./widget.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
 const STATUS = "pi-background";
 const WATCH = "pi-background-watch";
+const RUNS = "pi-background-runs";
 // Saved as the backgrounded turn's prompt so the model knows why its last step reads "aborted".
 const MOVED = "(This session was moved to the background mid-turn; the last step was interrupted.) Continue.";
 
@@ -67,6 +69,11 @@ let primed = false;
 let liveUi: ExtensionContext["ui"] | undefined;
 // Questions from background runs already announced (by id), so each is notified once per pi process.
 const announced = new Set<string>();
+// The runs widget lists ended runs until the user's next prompt. A "died" run has no endedAt, so it counts as ended
+// when first seen dead (0 for runs already dead when this pi started).
+let lastPrompt = Date.now();
+const diedAt = new Map<string, number>();
+const endedAt = (r: Run) => (r.endedAt ? Date.parse(r.endedAt) : (diedAt.get(`${r.pid}:${r.startedAt}`) ?? 0));
 
 /**
  * Shows a background run's question here and returns the answer, or undefined if dismissed (Esc), which leaves
@@ -118,6 +125,8 @@ export function newSessionFile(cwd: string, name?: string, sessionDir?: string):
 		return { file, pid: spawnRunner(file, msg, cwd, warn, env) };
 	},
 	runs: () => listRuns(runsDir()),
+	/** Newest pi-summarize activity line in a session file, or undefined. */
+	activity: (file: string) => latestActivity(file),
 	/** Stops a live run like /bg stop (SIGTERM; it ends as "stopped"). False when no live run has this pid. */
 	stop(pid: number) {
 		const r = listRuns(runsDir()).find((x) => x.pid === pid && (x.status === "running" || x.status === "waiting"));
@@ -245,7 +254,12 @@ export default function (pi: ExtensionAPI) {
 		const runs = listRuns(runsDir());
 		const live = runs.filter((r) => r.status === "running" || r.status === "waiting");
 		const blocked = live.filter((r) => r.waiting?.length);
-		ui?.ui.setStatus(STATUS, live.length ? `bg: ${live.length} running${blocked.length ? `, ${blocked.length} waiting on you` : ""}` : undefined);
+		ui?.ui.setStatus(STATUS, live.length ? `background: ${live.length} running${blocked.length ? `, ${blocked.length} waiting on you` : ""}` : undefined);
+		for (const r of runs) {
+			const key = `${r.pid}:${r.startedAt}`;
+			if (r.status === "died" && !r.endedAt && !diedAt.has(key)) diedAt.set(key, primed ? Date.now() : 0);
+		}
+		ui?.ui.setWidget(RUNS, widgetLines(runs, { now: Date.now(), since: lastPrompt, endedAt, activity: latestActivity }));
 		for (const r of blocked) {
 			for (const a of r.waiting!) {
 				if (announced.has(a.id)) continue;
@@ -267,6 +281,7 @@ export default function (pi: ExtensionAPI) {
 		liveUi = ctx.ui;
 		poll(); // the first poll in a pi process marks already-finished runs as seen without notifying
 		primed = true;
+		clearInterval(timer);
 		timer = setInterval(poll, 5000);
 		timer.unref();
 		lock(ctx);
@@ -296,6 +311,10 @@ export default function (pi: ExtensionAPI) {
 
 	// Startup (pi -c, pi --session) fires no session_before_switch, so the only safe gate is before input is accepted.
 	pi.on("input", (event, ctx) => {
+		if (event.source === "interactive") {
+			lastPrompt = Date.now(); // ended runs drop off the widget
+			poll();
+		}
 		const file = ctx.sessionManager.getSessionFile();
 		if (watching && watching.file === file) {
 			// Like typing during a turn: the message is queued and the background run picks it up.
@@ -333,6 +352,8 @@ export default function (pi: ExtensionAPI) {
 		stale = undefined;
 		unwatch();
 		clearInterval(timer);
+		timer = undefined;
+		ui?.ui.setWidget(RUNS, undefined);
 		ui = undefined;
 		liveUi = undefined; // this ctx goes stale once the session is replaced
 	});
