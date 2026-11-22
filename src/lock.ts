@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { linkSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { basename } from "node:path";
 
 /** Who has a session file open. Pi core and pi-sync don't lock session files, so every writer must honor this. */
 export type Holder = { pid: number; host: string; role: "tui" | "bg"; startedAt: string };
@@ -21,7 +22,8 @@ export function alive(pid: number): boolean {
 		if ((e as NodeJS.ErrnoException).code !== "EPERM") return false;
 	}
 	try {
-		return /node|pi/i.test(readFileSync(`/proc/${pid}/comm`, "utf8"));
+		// argv[0], not comm: Node names its main thread "MainThread", so comm never says node on Linux.
+		return /node|pi/i.test(basename(readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")[0]!));
 	} catch {}
 	try {
 		const comm = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });

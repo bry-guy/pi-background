@@ -12,9 +12,10 @@ Install [pi-keepalive](https://github.com/bry-guy/pi-keepalive) too if you want 
 
 ## Use
 
-- **Switch away while a turn is running** (`/resume`, `/new`, `/project`): the turn keeps going in the background. You see `Running "<session>" in background…`, and the footer shows `bg: N running`.
+- **Switch away while a turn is running** (`/resume`, `/new`, `/project`): the turn keeps going in the background. You see `Running "<session>" in background…`, and the footer shows `background: N running`.
 - **Go back to it** with `/resume`: you watch it live. A status says "background session running", messages you type are queued and picked up by the run, and Esc stops it. When the turn ends, it's a normal session again.
-- **A background run that needs you waits for you.** When an extension asks something (a permission gate, `ask_user_question`, pi-sync's "take it over?"), the turn pauses. Every open pi gets a notice, `"<session>" is waiting on you: <question>`, and the footer shows `bg: N running, M waiting on you`. Answer it from wherever you are with `/bg`, or `/resume` the session and answer it there. Esc leaves it waiting. There is no timeout, and with pi-keepalive the machine may sleep while it waits.
+- **A background run that needs you waits for you.** When an extension asks something (a permission gate, `ask_user_question`, pi-sync's "take it over?"), the turn pauses. Every open pi gets a notice, `"<session>" is waiting on you: <question>`, and the footer shows `background: N running, M waiting on you`. Answer it from wherever you are with `/bg`, or `/resume` the session and answer it there. Esc leaves it waiting. There is no timeout, and with pi-keepalive the machine may sleep while it waits.
+- **What runs are doing.** Above the editor, one line per background run on this machine that is running or waiting: its name, state (`starting`, `running`, `waiting on you`), elapsed time, and its latest [pi-summarize](https://github.com/bry-guy/pi-summarize) activity line (else the tool it is running). Refreshed every 5 s. A run that ends stays listed with its final state (`done`, `error`, `stopped`, `stalled`, `died`) until your next prompt. At most 6 lines, then `+N more`.
 - `/bg <message>`: send a message and leave in one step.
 - `/bg`: answer what background runs are waiting on.
 - `/bg list`, `/bg stop`: housekeeping.
@@ -27,7 +28,7 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 - **Runner.** Each background run is a detached `node src/runner.ts` process that drives `pi --mode rpc --session <file>` (the installed pi's own CLI). So the session loads exactly what your TUI loads (settings, extensions including pi's built-ins, packages, skills, AGENTS.md, enabledModels), and the runner uses only pi's public interfaces.
 - **One turn per run.** The runner runs a single turn (plus any messages queued while you watch), then saves and exits.
 - **Watching.** The runner streams events over `~/.pi/agent/background/<pid>.sock`; the TUI shows them under the transcript and reloads the session when the run ends. On SIGTERM it aborts the turn first, so the partial turn is saved.
-- **Run records.** Runs are recorded in `~/.pi/agent/background/<pid>.json`, with a log next to each record.
+- **Run records.** Runs are recorded in `~/.pi/agent/background/<pid>.json` (written to a temp file and renamed, so a reader never sees half a record), with a log next to each record.
 - **Dialogs.** Extension dialogs (select, confirm, input, editor) arrive from pi's RPC mode and are forwarded over the socket and recorded in the run record (`waiting`); the first TUI to answer wins. Notifications are shown to watchers; other UI calls (widgets, status, custom components) do nothing. Messages you type while watching are confirmed by the run when it starts them; any it never took are sent from your TUI once the run ends.
 - **Extensions can tell.** Extensions see `PI_BACKGROUND=1` inside a runner, and `hasUI=true` because their dialogs reach you.
 
@@ -46,6 +47,8 @@ once it's 10 minutes old, SIGKILL at 13. monit runs as your own daemon with its 
 - `start({ cwd, msg, env, name })` creates a new session in `cwd` (named `name`, if given), runs `msg` in it in the
   background with extra `env`, and returns `{ file, pid }`. pi-projects' `role_agent` uses it with `PI_ROLE`.
 - `runs()` lists runs (`Run` in `src/registry.ts`).
+- `activity(file)` returns the newest pi-summarize activity line in a session file (read from its last 64 KB), or
+  undefined.
 - `stop(pid)` stops a live run like `/bg stop`; returns false when no live run has that pid.
 
 ## Limits

@@ -234,7 +234,11 @@ try {
 	let tool: string | undefined;
 	let last: { stopReason?: string; errorMessage?: string } | undefined;
 	listeners.add((e: any) => {
-		if (e.type === "tool_execution_start") toolsRunning.set(e.toolCallId, Date.now());
+		if (e.type === "tool_execution_start") {
+			toolsRunning.set(e.toolCallId, Date.now());
+			run.tool = e.toolName; // for listings when the session has no activity lines
+			if (!finished) writeRun(dir, run);
+		}
 		else if (e.type === "tool_execution_end") toolsRunning.delete(e.toolCallId);
 	});
 	listeners.add((e: any) => {
