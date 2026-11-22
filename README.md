@@ -13,9 +13,9 @@ Install [pi-keepalive](https://github.com/bry-guy/pi-keepalive) too if you want 
 ## Use
 
 - **Switch away while a turn is running** (`/resume`, `/new`, `/project`): the turn keeps going in the background. You see `Running "<session>" in background…`, and the footer shows `background: N running`.
-- **Go back to it** with `/resume`: you watch it live. A status says "background session running", messages you type are queued and picked up by the run, and Esc stops it. When the turn ends, it's a normal session again.
+- **Go back to it** with `/resume`: you watch it live. A status says "watching · Esc stops it", messages you type are queued and picked up by the run, and Esc stops it. When the turn ends, it's a normal session again.
 - **A background run that needs you waits for you.** When an extension asks something (a permission gate, `ask_user_question`, pi-sync's "take it over?"), the turn pauses. Every open pi gets a notice, `"<session>" is waiting on you: <question>`, and the footer shows `background: N running, M waiting on you`. Answer it from wherever you are with `/bg`, or `/resume` the session and answer it there. Esc leaves it waiting. There is no timeout, and with pi-keepalive the machine may sleep while it waits.
-- **What runs are doing.** Above the editor, one line per background run on this machine that is running or waiting: its name, state (`starting`, `running`, `waiting on you`), elapsed time, and its latest [pi-summarize](https://github.com/bry-guy/pi-summarize) activity line, clipped so a row fits the terminal. Refreshed every 5 s. A run that ends stays listed with its final state (`done`, `error`, `stopped`, `stalled`, `died`) until your next prompt. At most 6 lines, then `+N more`.
+- **What runs are doing.** Above the editor, one line per background run on this machine that is running or waiting: its name, state (`starting`, `running`, `waiting on you`), elapsed time, and what it is doing now (`running <tool>`, from the run record; nothing while the model is thinking before its first tool), clipped so a row fits the terminal. pi's RPC mode does not forward the child's working message, so [pi-summarize](https://github.com/bry-guy/pi-summarize)'s live line can't be shown; its activity entries are written when a step ends, so an ended run shows its error or `last step: <activity>` instead. Refreshed every 5 s. A run that ends stays listed with its final state (`done`, `error`, `stopped`, `stalled`, `died`) until your next prompt. At most 6 lines, then `+N more`.
 - `/bg <message>`: send a message and leave in one step.
 - `/bg`: answer what background runs are waiting on.
 - `/bg list`, `/bg stop`: housekeeping.
@@ -38,7 +38,7 @@ A run that makes no progress for 10 minutes is stopped and listed as `stalled`. 
 `<agentDir>/background/<pid>.beat` on every event from pi (and every 30 s while it waits on you or a tool call is still running, so waiting or a
 long quiet build isn't a stall; a single tool call counts as progress for at most 2 hours). A per-run [monit](https://mmonit.com/monit/) check (`brew install monit`) watches that file and sends SIGTERM
 once it's 10 minutes old, SIGKILL at 13. monit runs as your own daemon with its own config in
-`<agentDir>/background/monit/` and is started by the first run that needs it. Without monit, runs have no stall guard
+`<agentDir>/background/monit/` and is started by the first run that needs it. Checks whose runner is gone (killed before it could clean up) are dropped when a pi with this extension starts and when a run starts. Without monit, runs have no stall guard
 (logged).
 
 ## For other extensions

@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { listRuns, type Run, writeRun } from "../src/registry.ts";
+import { activityTracker, listRuns, type Run, writeRun } from "../src/registry.ts";
 import { latestActivity } from "../src/widget.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "pibg-reg-"));
@@ -37,4 +37,22 @@ test("latestActivity: none, or no file", () => {
 	writeFileSync(f, `${message("hi")}\n`);
 	assert.equal(latestActivity(f), undefined);
 	assert.equal(latestActivity(join(dir(), "missing.jsonl")), undefined);
+});
+
+test("activityTracker: changes save at most once per interval, the last one always lands", async () => {
+	const run: Run = { pid: 1, file: "/f", name: "n", msg: "m", log: "", startedAt: "", status: "running", activity: null };
+	const saved: (string | null | undefined)[] = [];
+	const set = activityTracker(run, () => saved.push(run.activity), 50);
+	set("running bash");
+	set("running read");
+	set("running read"); // unchanged: nothing to do
+	await new Promise((r) => setTimeout(r, 20));
+	assert.deepEqual(saved, ["running read"]);
+	assert.ok(run.activityAt! > 0);
+	set("running edit");
+	set(null); // turn ended
+	await new Promise((r) => setTimeout(r, 20));
+	assert.deepEqual(saved, ["running read"]); // throttled
+	await new Promise((r) => setTimeout(r, 60));
+	assert.deepEqual(saved, ["running read", null]);
 });

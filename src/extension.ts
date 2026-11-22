@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { acquire, holder, mine, release, waitFree } from "./lock.ts";
 import { type Ask, listRuns, type Run } from "./registry.ts";
+import { pruneChecks } from "./stall.ts";
 import { latestActivity, widgetLines } from "./widget.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
@@ -153,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 	function watch(ctx: ExtensionContext, file: string) {
 		const w: NonNullable<typeof watching> = { file, lines: [], pending: new Map(), asking: new Map(), stopInput: () => {} };
 		watching = w;
-		ctx.ui.setStatus(WATCH, "background session running");
+		ctx.ui.setStatus(WATCH, "watching · Esc stops it");
 		w.stopInput = ctx.ui.onTerminalInput((data) => {
 			if (watching !== w || data !== "\x1b") return undefined;
 			w.sock?.write(`${JSON.stringify({ t: "abort" })}\n`);
@@ -277,6 +278,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		ui = ctx;
 		liveUi = ctx.ui;
+		if (!primed) pruneChecks(runsDir());
 		poll(); // the first poll in a pi process marks already-finished runs as seen without notifying
 		primed = true;
 		clearInterval(timer);
@@ -407,6 +409,7 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx.isIdle()) return ctx.ui.notify("Busy. Just switch sessions; the turn moves to the background.", "warning");
 			// pi writes a new session's file only after the first reply; the runner needs it to exist.
 			if (!existsSync(file)) writeFileSync(file, `${JSON.stringify(ctx.sessionManager.getHeader())}\n`);
+			lastPrompt = Date.now(); // like a prompt: ended runs drop off the widget
 			spawnRunner(file, arg, ctx.cwd, warn);
 			const notice = `Running "${titleOf(ctx)}" in background…`;
 			// Leave the session so only the runner writes to it; switching releases our lock.

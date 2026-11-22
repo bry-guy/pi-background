@@ -8,7 +8,7 @@ import { createServer, type Socket } from "node:net";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acquire, release, waitFree } from "./lock.ts";
-import { type Ask, type Run, writeRun } from "./registry.ts";
+import { activityTracker, type Ask, type Run, writeRun } from "./registry.ts";
 import { heartbeat, STALL_MS, watchWithMonit } from "./stall.ts";
 
 const [pkgDir, file, msg, log] = process.argv.slice(2);
@@ -42,6 +42,7 @@ const run: Run = {
 	startedAt: new Date().toISOString(),
 	status: "running",
 	sock: join(dir, `${process.pid}.sock`),
+	activity: null,
 };
 const log_ = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 
@@ -154,7 +155,7 @@ async function finish(status: Run["status"], error?: string) {
 	unwatch?.();
 	hb.remove();
 	release(file);
-	writeRun(dir, { ...run, waiting: undefined, status, error, endedAt: new Date().toISOString() });
+	writeRun(dir, { ...run, waiting: undefined, activity: null, status, error, endedAt: new Date().toISOString() });
 	log_("finished", status, error ?? "");
 	process.exit(status === "done" ? 0 : 1);
 }
@@ -233,9 +234,14 @@ try {
 	let partial = "";
 	let tool: string | undefined;
 	let last: { stopReason?: string; errorMessage?: string } | undefined;
+	// RPC mode drops the child's setWorkingMessage (pi-summarize's live line), so "now" is the tool that started last.
+	const setActivity = activityTracker(run, () => !finished && writeRun(dir, run));
 	listeners.add((e: any) => {
-		if (e.type === "tool_execution_start") toolsRunning.set(e.toolCallId, Date.now());
-		else if (e.type === "tool_execution_end") toolsRunning.delete(e.toolCallId);
+		if (e.type === "tool_execution_start") {
+			toolsRunning.set(e.toolCallId, Date.now());
+			setActivity(`running ${e.toolName}`);
+		} else if (e.type === "tool_execution_end") toolsRunning.delete(e.toolCallId);
+		else if (e.type === "agent_end") setActivity(null);
 	});
 	listeners.add((e: any) => {
 		if (e.type === "message_start" && e.message?.role === "assistant") partial = "";

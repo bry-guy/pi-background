@@ -1,6 +1,7 @@
 // The "background runs" widget: one line per run that is running, waiting on you, or ended since the last prompt.
 // Pure, so tests can load it without pi.
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
 import type { Run } from "./registry.ts";
 
 export const MAX_ROWS = 6;
@@ -14,7 +15,8 @@ export function elapsed(ms: number): string {
 	return m < 60 ? `${m}m ${String(s % 60).padStart(2, "0")}s` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 }
 
-const clip = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+/** At most n terminal columns (wide characters count as two). */
+const clip = (t: string, n: number) => (visibleWidth(t) > n ? `${sliceByColumn(t, 0, n - 1, true)}…` : t);
 
 /** Session name, else the first words of its first message (an unnamed run's name is its file name). */
 export const runTitle = (r: Run) => clip(r.name && !r.name.endsWith(".jsonl") ? r.name : r.msg.split(/\s+/).slice(0, 6).join(" "), 40);
@@ -30,18 +32,19 @@ export interface WidgetInput {
 	since: number;
 	/** When an ended run ended (a "died" run has no endedAt in its record). */
 	endedAt(r: Run): number;
-	/** Latest activity line of a session file. */
+	/** Latest pi-summarize line of a session file: written when a step ends, so shown only for ended runs. */
 	activity(file: string): string | undefined;
 	/** Terminal columns (80 when unknown); a row never wraps. */
 	width?: number;
 }
 
-/** A run's row without the 2-column marker, at most `width` columns: the activity or error is clipped first. */
-export function runLine(r: Run, o: WidgetInput, width = 78): string {
+/** A run's row without its marker, at most `width` columns: the activity or error is clipped first. */
+export function runLine(r: Run, o: WidgetInput, width = 76): string {
 	const start = Date.parse(r.startedAt);
 	const head = [runTitle(r), runState(r), elapsed((live(r) ? o.now : o.endedAt(r)) - start)].join(" · ");
-	const what = live(r) ? o.activity(r.file) : r.error;
-	const room = width - head.length - 3;
+	const last = live(r) ? undefined : o.activity(r.file);
+	const what = live(r) ? r.activity : (r.error ?? (last && `last step: ${last}`));
+	const room = width - visibleWidth(head) - 3;
 	return clip(what && room >= 2 ? `${head} · ${clip(what, room)}` : head, width);
 }
 
@@ -49,7 +52,8 @@ export function runLine(r: Run, o: WidgetInput, width = 78): string {
 export function widgetLines(runs: Run[], o: WidgetInput): string[] | undefined {
 	const shown = runs.filter((r) => live(r) || o.endedAt(r) > o.since);
 	if (!shown.length) return undefined;
-	const lines = shown.slice(0, MAX_ROWS).map((r) => `◇ ${runLine(r, o, (o.width || 80) - 2)}`);
+	// pi pads a widget line by one column each side, and the marker takes two.
+	const lines = shown.slice(0, MAX_ROWS).map((r) => `◇ ${runLine(r, o, (o.width || 80) - 4)}`);
 	if (shown.length > MAX_ROWS) lines.push(`  +${shown.length - MAX_ROWS} more`);
 	return lines;
 }
