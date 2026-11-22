@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { alive } from "./lock.ts";
 
@@ -17,8 +17,6 @@ export type Run = {
 	sock?: string;
 	/** Questions an extension asked that wait for an answer from a TUI; the turn is paused on them. */
 	waiting?: Ask[];
-	/** The tool call running now (or last), for listings when the session has no pi-summarize activity. */
-	tool?: string;
 };
 
 /** An extension dialog (select, confirm, input, editor) a background run forwards to whoever answers first. */
@@ -40,36 +38,6 @@ export function writeRun(dir: string, run: Run): void {
 	const tmp = join(dir, `${run.pid}.json.${process.pid}.tmp`);
 	writeFileSync(tmp, JSON.stringify(run, null, 2));
 	renameSync(tmp, join(dir, `${run.pid}.json`));
-}
-
-/**
- * The newest pi-summarize activity line in a session file, reading only its last `max` bytes (a partial first or
- * last line is skipped). Undefined when there is none. Only these entries: never model text or thinking.
- */
-export function latestActivity(file: string, max = 64 * 1024): string | undefined {
-	let fd: number | undefined;
-	try {
-		fd = openSync(file, "r");
-		const size = fstatSync(fd).size;
-		const len = Math.min(size, max);
-		const buf = Buffer.alloc(len);
-		readSync(fd, buf, 0, len, size - len);
-		const lines = buf.toString("utf8").split("\n");
-		if (len < size) lines.shift();
-		for (let i = lines.length - 1; i >= 0; i--) {
-			if (!lines[i]!.includes('"pi-summarize"')) continue;
-			try {
-				const e = JSON.parse(lines[i]!);
-				const text = e.type === "custom" && e.customType === "pi-summarize" && e.data?.kind === "activity" ? e.data.text : undefined;
-				const clean = typeof text === "string" ? text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").trim() : "";
-				if (clean) return clean.length > 100 ? `${clean.slice(0, 99)}…` : clean;
-			} catch {}
-		}
-	} catch {
-	} finally {
-		if (fd !== undefined) closeSync(fd);
-	}
-	return undefined;
 }
 
 /** All runs, newest first. A "running" run whose process is gone is reported as "died". Runs ended over a day ago are pruned. */

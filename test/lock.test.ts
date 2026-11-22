@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { acquire, holder, lockPath, mine, reclaim, release, waitFree } from "../src/lock.ts";
+import { acquire, holder, lockPath, mine, nodeCmdline, reclaim, release, waitFree } from "../src/lock.ts";
 
 const session = () => join(mkdtempSync(join(tmpdir(), "pibg-")), "s.jsonl");
 
@@ -73,4 +73,11 @@ test("mine recognizes only this process's lock", () => {
 	assert.equal(mine({ pid: process.pid, host: "elsewhere", role: "tui", startedAt: "" }), false);
 	assert.equal(mine(undefined), false);
 	release(f);
+});
+
+test("nodeCmdline: argv[0] of /proc/<pid>/cmdline names node or pi", () => {
+	assert.equal(nodeCmdline("/usr/local/bin/node\0/x/runner.ts\0--session\0f\0"), true);
+	assert.equal(nodeCmdline("pi\0--mode\0rpc\0"), true);
+	assert.equal(nodeCmdline("/usr/bin/bash\0-c\0node x\0"), false); // node only in a later arg
+	assert.equal(nodeCmdline(""), false);
 });

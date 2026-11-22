@@ -3,7 +3,8 @@ import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { latestActivity, listRuns, type Run, writeRun } from "../src/registry.ts";
+import { listRuns, type Run, writeRun } from "../src/registry.ts";
+import { latestActivity } from "../src/widget.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "pibg-reg-"));
 const activity = (text: string) => JSON.stringify({ type: "custom", customType: "pi-summarize", data: { kind: "activity", text, at: 1 } });
@@ -13,9 +14,9 @@ test("writeRun replaces the record atomically and leaves no temp file", () => {
 	const d = dir();
 	const run: Run = { pid: process.pid, file: "/f", name: "n", msg: "m", log: "", startedAt: new Date().toISOString(), status: "running" };
 	writeRun(d, run);
-	writeRun(d, { ...run, tool: "read" });
+	writeRun(d, { ...run, name: "renamed" });
 	assert.deepEqual(readdirSync(d), [`${process.pid}.json`]);
-	assert.equal(listRuns(d)[0]!.tool, "read");
+	assert.equal(listRuns(d)[0]!.name, "renamed");
 });
 
 test("latestActivity: newest activity entry, never assistant text", () => {

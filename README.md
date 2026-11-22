@@ -15,7 +15,7 @@ Install [pi-keepalive](https://github.com/bry-guy/pi-keepalive) too if you want 
 - **Switch away while a turn is running** (`/resume`, `/new`, `/project`): the turn keeps going in the background. You see `Running "<session>" in background…`, and the footer shows `background: N running`.
 - **Go back to it** with `/resume`: you watch it live. A status says "background session running", messages you type are queued and picked up by the run, and Esc stops it. When the turn ends, it's a normal session again.
 - **A background run that needs you waits for you.** When an extension asks something (a permission gate, `ask_user_question`, pi-sync's "take it over?"), the turn pauses. Every open pi gets a notice, `"<session>" is waiting on you: <question>`, and the footer shows `background: N running, M waiting on you`. Answer it from wherever you are with `/bg`, or `/resume` the session and answer it there. Esc leaves it waiting. There is no timeout, and with pi-keepalive the machine may sleep while it waits.
-- **What runs are doing.** Above the editor, one line per background run on this machine that is running or waiting: its name, state (`starting`, `running`, `waiting on you`), elapsed time, and its latest [pi-summarize](https://github.com/bry-guy/pi-summarize) activity line (else the tool it is running). Refreshed every 5 s. A run that ends stays listed with its final state (`done`, `error`, `stopped`, `stalled`, `died`) until your next prompt. At most 6 lines, then `+N more`.
+- **What runs are doing.** Above the editor, one line per background run on this machine that is running or waiting: its name, state (`starting`, `running`, `waiting on you`), elapsed time, and its latest [pi-summarize](https://github.com/bry-guy/pi-summarize) activity line, clipped so a row fits the terminal. Refreshed every 5 s. A run that ends stays listed with its final state (`done`, `error`, `stopped`, `stalled`, `died`) until your next prompt. At most 6 lines, then `+N more`.
 - `/bg <message>`: send a message and leave in one step.
 - `/bg`: answer what background runs are waiting on.
 - `/bg list`, `/bg stop`: housekeeping.
@@ -47,8 +47,6 @@ once it's 10 minutes old, SIGKILL at 13. monit runs as your own daemon with its 
 - `start({ cwd, msg, env, name })` creates a new session in `cwd` (named `name`, if given), runs `msg` in it in the
   background with extra `env`, and returns `{ file, pid }`. pi-projects' `role_agent` uses it with `PI_ROLE`.
 - `runs()` lists runs (`Run` in `src/registry.ts`).
-- `activity(file)` returns the newest pi-summarize activity line in a session file (read from its last 64 KB), or
-  undefined.
 - `stop(pid)` stops a live run like `/bg stop`; returns false when no live run has that pid.
 
 ## Limits

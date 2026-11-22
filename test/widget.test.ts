@@ -28,19 +28,19 @@ test("elapsed", () => {
 	assert.equal(elapsed(3_900_000), "1h 05m");
 });
 
-test("one line per run: name, state, elapsed, activity (else the last tool)", () => {
+test("one line per run: name, state, elapsed, activity", () => {
 	const lines = widgetLines(
 		[
 			run(1, { name: "pi-web/pi-web-developer: fix DOM test" }),
-			run(2, { tool: "bash" }),
+			run(2),
 			run(3, { waiting: [{ id: "a", method: "confirm", title: "Push?" }] }),
 			run(4, { status: "waiting" }),
 		],
-		input(),
+		input({ width: 120 }),
 	);
 	assert.deepEqual(lines, [
 		"◇ pi-web/pi-web-developer: fix DOM test · running · 6m 20s · Checking why the DOM gate fails",
-		"◇ Fix the flaky DOM test in · running · 6m 20s · bash…",
+		"◇ Fix the flaky DOM test in · running · 6m 20s",
 		"◇ Fix the flaky DOM test in · waiting on you · 6m 20s",
 		"◇ Fix the flaky DOM test in · starting · 6m 20s",
 	]);
@@ -60,4 +60,15 @@ test("no runs, no widget; more than six collapse", () => {
 	const lines = widgetLines([1, 2, 3, 4, 5, 6, 7, 8].map((p) => run(p)), input())!;
 	assert.equal(lines.length, 7);
 	assert.equal(lines[6], "  +2 more");
+});
+
+test("rows never wrap: the activity is clipped first, then the row", () => {
+	const r = run(1, { name: "pi-web/pi-web-developer: fix DOM test" });
+	const [line] = widgetLines([r], input({ width: 70 }))!;
+	assert.equal(line, "◇ pi-web/pi-web-developer: fix DOM test · running · 6m 20s · Checking…");
+	assert.equal(line!.length, 70);
+	assert.equal(widgetLines([r], input({ width: 60 }))![0], "◇ pi-web/pi-web-developer: fix DOM test · running · 6m 20s");
+	assert.equal(widgetLines([r], input({ width: 40 }))![0]!.length, 40);
+	const long = { activity: () => "x".repeat(200) };
+	assert.equal(widgetLines([r], input(long))![0]!.length, 80); // unknown width: 80
 });

@@ -5,8 +5,8 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { acquire, holder, mine, release, waitFree } from "./lock.ts";
-import { type Ask, latestActivity, listRuns, type Run } from "./registry.ts";
-import { widgetLines } from "./widget.ts";
+import { type Ask, listRuns, type Run } from "./registry.ts";
+import { latestActivity, widgetLines } from "./widget.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
 const STATUS = "pi-background";
@@ -125,8 +125,6 @@ export function newSessionFile(cwd: string, name?: string, sessionDir?: string):
 		return { file, pid: spawnRunner(file, msg, cwd, warn, env) };
 	},
 	runs: () => listRuns(runsDir()),
-	/** Newest pi-summarize activity line in a session file, or undefined. */
-	activity: (file: string) => latestActivity(file),
 	/** Stops a live run like /bg stop (SIGTERM; it ends as "stopped"). False when no live run has this pid. */
 	stop(pid: number) {
 		const r = listRuns(runsDir()).find((x) => x.pid === pid && (x.status === "running" || x.status === "waiting"));
@@ -259,7 +257,7 @@ export default function (pi: ExtensionAPI) {
 			const key = `${r.pid}:${r.startedAt}`;
 			if (r.status === "died" && !r.endedAt && !diedAt.has(key)) diedAt.set(key, primed ? Date.now() : 0);
 		}
-		ui?.ui.setWidget(RUNS, widgetLines(runs, { now: Date.now(), since: lastPrompt, endedAt, activity: latestActivity }));
+		ui?.ui.setWidget(RUNS, widgetLines(runs, { now: Date.now(), since: lastPrompt, endedAt, activity: latestActivity, width: process.stdout.columns }));
 		for (const r of blocked) {
 			for (const a of r.waiting!) {
 				if (announced.has(a.id)) continue;
