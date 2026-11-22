@@ -2,8 +2,9 @@
 // run waits on you, so waiting isn't a stall), and a per-run monit check stops the run once the heartbeat is
 // 10 minutes old. monit runs as Bryan's own daemon with its own config in <agentDir>/background/monit.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { alive } from "./lock.ts";
 
 export const STALL_MS = 10 * 60_000;
 
@@ -39,6 +40,40 @@ function monitBin(): string | undefined {
 	return undefined;
 }
 
+/** `monit reload` exits 0 even with no daemon, so start one when its pid isn't alive (unless only cleaning up). */
+function reload(monit: string, root: string, log: (...a: unknown[]) => void, start = true) {
+	let running = false;
+	try {
+		process.kill(Number(readFileSync(join(root, "monit.pid"), "utf8")), 0);
+		running = true;
+	} catch {}
+	if (!running && !start) return;
+	try {
+		execFileSync(monit, running ? ["-c", join(root, "monitrc"), "reload"] : ["-c", join(root, "monitrc")], { stdio: "ignore", timeout: 10_000 });
+	} catch (e) {
+		log("monit failed", (e as Error).message);
+	}
+}
+
+/**
+ * Drops checks whose runner is gone. A runner that never reaches its cleanup (SIGKILL, including monit's own at 13
+ * minutes, a crash, a reboot) leaves its check behind, and monit then logs the missing heartbeat every 30 s forever.
+ */
+export function pruneChecks(dir: string, log: (...a: unknown[]) => void = () => {}): number {
+	const root = join(dir, "monit");
+	let names: string[];
+	try {
+		names = readdirSync(join(root, "checks"));
+	} catch {
+		return 0;
+	}
+	const dead = names.filter((n) => /^\d+\.monitrc$/.test(n) && !alive(Number.parseInt(n, 10)));
+	for (const n of dead) rmSync(join(root, "checks", n), { force: true });
+	const monit = monitBin();
+	if (dead.length && monit && existsSync(join(root, "monitrc"))) reload(monit, root, log, false);
+	return dead.length;
+}
+
 /** Registers the per-run monit check. Returns a cleanup, or undefined when monit isn't installed. */
 export function watchWithMonit(dir: string, pid: number, beatFile: string, log: (...a: unknown[]) => void): (() => void) | undefined {
 	const monit = monitBin();
@@ -49,9 +84,9 @@ export function watchWithMonit(dir: string, pid: number, beatFile: string, log: 
 	const root = join(dir, "monit");
 	const checks = join(root, "checks");
 	mkdirSync(checks, { recursive: true });
-	const rc = join(root, "monitrc");
+	pruneChecks(dir, log);
 	writeFileSync(
-		rc,
+		join(root, "monitrc"),
 		[
 			"set daemon 30",
 			`set log ${join(root, "monit.log")}`,
@@ -77,26 +112,10 @@ export function watchWithMonit(dir: string, pid: number, beatFile: string, log: 
 		].join("\n"),
 		{ mode: 0o600 },
 	);
-	const running = () => {
-		try {
-			process.kill(Number(readFileSync(join(root, "monit.pid"), "utf8")), 0);
-			return true;
-		} catch {
-			return false;
-		}
-	};
-	// `monit reload` exits 0 even with no daemon, so start one when its pid isn't alive.
-	const reload = () => {
-		try {
-			execFileSync(monit, running() ? ["-c", rc, "reload"] : ["-c", rc], { stdio: "ignore", timeout: 10_000 });
-		} catch (e) {
-			log("monit failed", (e as Error).message);
-		}
-	};
-	reload();
+	reload(monit, root, log);
 	log("monit watching", beatFile);
 	return () => {
 		rmSync(check, { force: true });
-		reload();
+		reload(monit, root, log);
 	};
 }

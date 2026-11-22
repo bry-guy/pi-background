@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { linkSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { basename } from "node:path";
 
 /** Who has a session file open. Pi core and pi-sync don't lock session files, so every writer must honor this. */
 export type Holder = { pid: number; host: string; role: "tui" | "bg"; startedAt: string };
@@ -13,6 +14,9 @@ const HOST = hostname();
 /** True if `h` is this process's own lock. */
 export const mine = (h: Holder | undefined) => h?.pid === process.pid && h.host === HOST;
 
+/** Linux /proc/<pid>/cmdline names node/pi in argv[0]. Not comm: Node names its main thread "MainThread". */
+export const nodeCmdline = (cmdline: string) => /node|pi/i.test(basename(cmdline.split("\0")[0]!));
+
 /** True if `pid` is running and is a node/pi process (a reused pid of another program counts as dead). */
 export function alive(pid: number): boolean {
 	try {
@@ -21,7 +25,7 @@ export function alive(pid: number): boolean {
 		if ((e as NodeJS.ErrnoException).code !== "EPERM") return false;
 	}
 	try {
-		return /node|pi/i.test(readFileSync(`/proc/${pid}/comm`, "utf8"));
+		return nodeCmdline(readFileSync(`/proc/${pid}/cmdline`, "utf8"));
 	} catch {}
 	try {
 		const comm = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
