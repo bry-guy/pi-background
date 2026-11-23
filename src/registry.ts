@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { alive } from "./lock.ts";
 
@@ -70,6 +70,9 @@ export function listRuns(dir: string): Run[] {
 	return runs.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
+/** A running run's activity: what the step is about when pi-summarize has said so, and the tool running now. */
+export const nowDoing = (step: string | undefined, tool: string) => (step ? `${step} (${tool})` : `running ${tool}`);
+
 /** Sets run.activity, saving the record at most once per `ms`; the last change always lands. */
 export function activityTracker(run: Run, save: () => void, ms = 3_000) {
 	let savedAt = 0;
@@ -86,4 +89,34 @@ export function activityTracker(run: Run, save: () => void, ms = 3_000) {
 		}, Math.max(0, savedAt + ms - Date.now()));
 		timer.unref?.();
 	};
+}
+
+/**
+ * The newest pi-summarize activity line in a session file, reading only its last `max` bytes (a partial first or
+ * last line is skipped). Undefined when there is none. Only these entries: never model text or thinking.
+ */
+export function latestActivity(file: string, max = 64 * 1024): string | undefined {
+	let fd: number | undefined;
+	try {
+		fd = openSync(file, "r");
+		const size = fstatSync(fd).size;
+		const len = Math.min(size, max);
+		const buf = Buffer.alloc(len);
+		readSync(fd, buf, 0, len, size - len);
+		const lines = buf.toString("utf8").split("\n");
+		if (len < size) lines.shift();
+		for (let i = lines.length - 1; i >= 0; i--) {
+			if (!lines[i]!.includes('"pi-summarize"')) continue;
+			try {
+				const e = JSON.parse(lines[i]!);
+				const text = e.type === "custom" && e.customType === "pi-summarize" && e.data?.kind === "activity" ? e.data.text : undefined;
+				const clean = typeof text === "string" ? text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").trim() : "";
+				if (clean) return clean.length > 100 ? `${clean.slice(0, 99)}…` : clean;
+			} catch {}
+		}
+	} catch {
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+	return undefined;
 }
