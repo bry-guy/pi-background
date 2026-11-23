@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Run } from "../src/registry.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { elapsed, widgetLines } from "../src/widget.ts";
+import { elapsed, statusText, widgetLines } from "../src/widget.ts";
 
 const T0 = Date.parse("2026-11-22T10:00:00Z");
 const run = (pid: number, extra: Partial<Run> = {}): Run => ({
@@ -86,4 +86,11 @@ test("a running row shows the record's activity, never a session breadcrumb; an 
 	assert.equal(widgetLines([run(1, { activity: null })], o)![0], "◇ Fix the flaky DOM test in · running · 6m 20s");
 	const done = run(1, { status: "done", endedAt: new Date(T0 + 60_000).toISOString() });
 	assert.equal(widgetLines([done], o)![0], "◇ Fix the flaky DOM test in · done · 1m 00s · last step: Checking why the DOM…");
+});
+
+test("statusText: runs here and elsewhere, and how many wait", () => {
+	assert.equal(statusText(0, 0, 0), undefined);
+	assert.equal(statusText(2, 0, 0), "background: 2 running");
+	assert.equal(statusText(1, 2, 1), "background: 1 here, 2 elsewhere, 1 waiting");
+	assert.equal(statusText(0, 2, 1), "background: 2 elsewhere, 1 waiting");
 });

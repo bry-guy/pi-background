@@ -39,6 +39,7 @@ const run: Run = {
 	name: basename(file),
 	msg,
 	log: log ?? "",
+	cwd,
 	startedAt: new Date().toISOString(),
 	status: "running",
 	sock: join(dir, `${process.pid}.sock`),
