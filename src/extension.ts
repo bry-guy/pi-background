@@ -5,9 +5,9 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { acquire, holder, mine, release, waitFree } from "./lock.ts";
-import { type Ask, listRuns, type Run } from "./registry.ts";
+import { type Ask, latestActivity, listRuns, type Run } from "./registry.ts";
 import { pruneChecks } from "./stall.ts";
-import { latestActivity, widgetLines } from "./widget.ts";
+import { widgetLines } from "./widget.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
 const STATUS = "pi-background";
