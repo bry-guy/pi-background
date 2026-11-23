@@ -11,9 +11,9 @@ import { acquire, release, waitFree } from "./lock.ts";
 import { activityTracker, type Ask, latestActivity, nowDoing, type Run, writeRun } from "./registry.ts";
 import { heartbeat, STALL_MS, watchWithMonit } from "./stall.ts";
 
-const [pkgDir, file, msg, log] = process.argv.slice(2);
+const [pkgDir, file, msg, log, model, thinking] = process.argv.slice(2);
 if (!pkgDir || !file || !msg) {
-	console.error("usage: runner.ts <pi-package-dir> <session-file> <message> [log-file]");
+	console.error("usage: runner.ts <pi-package-dir> <session-file> <message> [log-file] [provider/model] [thinking]");
 	process.exit(2);
 }
 
@@ -182,7 +182,7 @@ for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const) process.on(sig, () =
 
 try {
 	// The session header's cwd wins in pi anyway; starting there keeps relative paths in extensions honest.
-	child = spawn(process.execPath, [join(pkgDir, bin), "--mode", "rpc", "--session", file], {
+	child = spawn(process.execPath, [join(pkgDir, bin), "--mode", "rpc", "--session", file, ...(model ? ["--model", model] : []), ...(thinking ? ["--thinking", thinking] : [])], {
 		cwd,
 		env: process.env,
 		stdio: ["pipe", "pipe", "pipe"],

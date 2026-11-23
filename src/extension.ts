@@ -43,12 +43,12 @@ function piPackageDir(): string {
 }
 
 /** Start a detached runner for one turn on `file`. It waits for this process to release the session lock. */
-function spawnRunner(file: string, msg: string, cwd: string, warn: (text: string) => void, env: Record<string, string> = {}): number | undefined {
+function spawnRunner(file: string, msg: string, cwd: string, warn: (text: string) => void, env: Record<string, string> = {}, model: string[] = []): number | undefined {
 	const dir = runsDir();
 	mkdirSync(dir, { recursive: true });
 	const log = join(dir, `${Date.now()}-${basename(file, ".jsonl")}.log`);
 	const out = openSync(log, "a");
-	const child = spawn(process.execPath, [RUNNER, piPackageDir(), file, msg, log], {
+	const child = spawn(process.execPath, [RUNNER, piPackageDir(), file, msg, log, ...model], {
 		cwd,
 		detached: true,
 		stdio: ["ignore", out, out],
@@ -77,6 +77,17 @@ function scopeOf(cwd: string): string {
 let pendingNotice: string | undefined;
 const notified = new Set<string>();
 let primed = false;
+// The live session, for the model a new background session starts with. Set in runners too (a role run can start one).
+let live: ExtensionContext | undefined;
+/** The live session's model ("provider/id") and thinking level, "" for one that is unknown. */
+function liveModel(): string[] {
+	try {
+		const m = live?.model;
+		return [m ? `${m.provider}/${m.id}` : "", live?.thinkingLevel ?? ""];
+	} catch {
+		return []; // a replaced session's context throws
+	}
+}
 // The live session's ui; a runner's exit can arrive after the session that started it was replaced.
 let liveUi: ExtensionContext["ui"] | undefined;
 // Questions from background runs already announced (by id), so each is notified once per pi process.
@@ -131,10 +142,10 @@ export function newSessionFile(cwd: string, name?: string, sessionDir?: string):
 
 /** For other extensions (pi-projects' role_agent): start a new session in the background. */
 (globalThis as any)[Symbol.for("pi-background.v1")] = {
-	/** Creates a session in cwd, runs msg in it detached, and returns its file and runner pid. */
+	/** Creates a session in cwd, runs msg in it detached, and returns its file and runner pid. It gets the calling session's model and thinking level. */
 	start({ cwd, msg, env, name }: { cwd: string; msg: string; env?: Record<string, string>; name?: string }) {
 		const file = newSessionFile(cwd, name);
-		return { file, pid: spawnRunner(file, msg, cwd, warn, env) };
+		return { file, pid: spawnRunner(file, msg, cwd, warn, env, liveModel()) };
 	},
 	runs: () => listRuns(runsDir()),
 	/** Stops a live run like /bg stop (SIGTERM; it ends as "stopped"). False when no live run has this pid. */
@@ -146,6 +157,9 @@ export function newSessionFile(cwd: string, name?: string, sessionDir?: string):
 };
 
 export default function (pi: ExtensionAPI) {
+	pi.on("session_start", (_event, ctx) => {
+		live = ctx;
+	});
 	if (process.env.PI_BACKGROUND) return; // the runner locks its own session; don't nest
 	let held: string | undefined;
 	// Session opened while another process was writing it: our in-memory copy may be behind the file.
