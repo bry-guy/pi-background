@@ -3,8 +3,7 @@ import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { activityTracker, listRuns, type Run, writeRun } from "../src/registry.ts";
-import { latestActivity } from "../src/widget.ts";
+import { activityTracker, latestActivity, listRuns, nowDoing, type Run, writeRun } from "../src/registry.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "pibg-reg-"));
 const activity = (text: string) => JSON.stringify({ type: "custom", customType: "pi-summarize", data: { kind: "activity", text, at: 1 } });
@@ -55,4 +54,9 @@ test("activityTracker: changes save at most once per interval, the last one alwa
 	assert.deepEqual(saved, ["running read"]); // throttled
 	await new Promise((r) => setTimeout(r, 60));
 	assert.deepEqual(saved, ["running read", null]);
+});
+
+test("nowDoing: the step's summary with the tool, or just the tool before any summary exists", () => {
+	assert.equal(nowDoing("Fixing the test", "bash"), "Fixing the test (bash)");
+	assert.equal(nowDoing(undefined, "bash"), "running bash");
 });

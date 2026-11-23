@@ -63,20 +63,21 @@ test("no runs, no widget; more than six collapse", () => {
 	assert.equal(lines[6], "  +2 more");
 });
 
-test("rows never wrap: pi pads widget lines, so a row fits columns - 2; the activity is clipped first", () => {
-	const r = run(1, { name: "pi-web/pi-web-developer: fix DOM test", activity: "Checking why the DOM gate fails" });
-	const [line] = widgetLines([r], input({ width: 72 }))!;
-	assert.equal(line, "◇ pi-web/pi-web-developer: fix DOM test · running · 6m 20s · Checking…");
-	assert.equal(line!.length, 70);
-	assert.equal(widgetLines([r], input({ width: 62 }))![0], "◇ pi-web/pi-web-developer: fix DOM test · running · 6m 20s");
+test("rows never wrap: pi pads widget lines, so a row fits columns - 2; a live step that doesn't fit gets its own line", () => {
+	const r = run(1, { name: "pi-web/pi-web-developer: fix DOM test", activity: "Checking why the DOM gate fails (bash)" });
+	assert.deepEqual(widgetLines([r], input({ width: 72 })), [
+		"◇ pi-web/pi-web-developer: fix DOM test · running · 6m 20s",
+		"  Checking why the DOM gate fails (bash)",
+	]);
 	assert.equal(widgetLines([r], input({ width: 42 }))![0]!.length, 40);
-	assert.equal(widgetLines([{ ...r, activity: "x".repeat(200) }], input())![0]!.length, 78); // unknown width: 80
-	// The real-terminal case: 80 columns, which wrapped before.
-	const sleep = run(2, { name: "Sleep and echo test", activity: "Confirming the delayed command outputs match the expected text" });
-	assert.equal(widgetLines([sleep], input({ now: T0 + 24_000 }))![0]!.length, 78);
+	assert.deepEqual(widgetLines([r], input({ width: 42 }))![1], "  Checking why the DOM gate fails (bash)");
+	// Unknown width: 80. A step longer than the row is clipped on its own line.
+	assert.deepEqual(widgetLines([{ ...r, activity: "x".repeat(200) }], input())!.map((l) => l.length), [58, 78]);
 	// Wide characters count as two columns.
-	const wide = widgetLines([{ ...r, activity: "日本語".repeat(30) }], input())![0]!;
-	assert.ok(visibleWidth(wide) <= 78, `${visibleWidth(wide)}`);
+	for (const line of widgetLines([{ ...r, activity: "日本語".repeat(30) }], input())!) assert.ok(visibleWidth(line) <= 78, `${visibleWidth(line)}`);
+	// An ended row stays one line: its error or last step is clipped.
+	const done = run(2, { status: "error", error: "x".repeat(200), endedAt: new Date(T0 + 60_000).toISOString() });
+	assert.deepEqual(widgetLines([done], input())!.map((l) => l.length), [78]);
 });
 
 test("a running row shows the record's activity, never a session breadcrumb; an ended row shows its last step", () => {

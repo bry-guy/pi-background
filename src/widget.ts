@@ -1,6 +1,5 @@
-// The "background runs" widget: one line per run that is running, waiting on you, or ended since the last prompt.
+// The "background runs" widget: one row per run that is running, waiting on you, or ended since the last prompt.
 // Pure, so tests can load it without pi.
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
 import type { Run } from "./registry.ts";
 
@@ -53,37 +52,13 @@ export function widgetLines(runs: Run[], o: WidgetInput): string[] | undefined {
 	const shown = runs.filter((r) => live(r) || o.endedAt(r) > o.since);
 	if (!shown.length) return undefined;
 	// pi pads a widget line by one column each side, and the marker takes two.
-	const lines = shown.slice(0, MAX_ROWS).map((r) => `◇ ${runLine(r, o, (o.width || 80) - 4)}`);
+	const width = (o.width || 80) - 4;
+	const lines = shown.slice(0, MAX_ROWS).flatMap((r) => {
+		const now = live(r) && r.activity;
+		// A live run's step rarely fits beside its name: it gets its own line rather than being cut to a few words.
+		if (now && visibleWidth(runLine(r, o, Infinity)) > width) return [`◇ ${runLine({ ...r, activity: null }, o, width)}`, `  ${clip(now, width)}`];
+		return [`◇ ${runLine(r, o, width)}`];
+	});
 	if (shown.length > MAX_ROWS) lines.push(`  +${shown.length - MAX_ROWS} more`);
 	return lines;
-}
-
-/**
- * The newest pi-summarize activity line in a session file, reading only its last `max` bytes (a partial first or
- * last line is skipped). Undefined when there is none. Only these entries: never model text or thinking.
- */
-export function latestActivity(file: string, max = 64 * 1024): string | undefined {
-	let fd: number | undefined;
-	try {
-		fd = openSync(file, "r");
-		const size = fstatSync(fd).size;
-		const len = Math.min(size, max);
-		const buf = Buffer.alloc(len);
-		readSync(fd, buf, 0, len, size - len);
-		const lines = buf.toString("utf8").split("\n");
-		if (len < size) lines.shift();
-		for (let i = lines.length - 1; i >= 0; i--) {
-			if (!lines[i]!.includes('"pi-summarize"')) continue;
-			try {
-				const e = JSON.parse(lines[i]!);
-				const text = e.type === "custom" && e.customType === "pi-summarize" && e.data?.kind === "activity" ? e.data.text : undefined;
-				const clean = typeof text === "string" ? text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").trim() : "";
-				if (clean) return clean.length > 100 ? `${clean.slice(0, 99)}…` : clean;
-			} catch {}
-		}
-	} catch {
-	} finally {
-		if (fd !== undefined) closeSync(fd);
-	}
-	return undefined;
 }
