@@ -54,6 +54,8 @@ function spawnRunner(file: string, msg: string, cwd: string, warn: (text: string
 		stdio: ["ignore", out, out],
 		env: { ...process.env, ...env, PI_BACKGROUND: "1" },
 	});
+	// Without a listener a failed spawn (e.g. node's path gone after a brew upgrade) is uncaught and kills pi.
+	child.on("error", (e) => warn(`Background run failed to start: ${e.message}. Restart pi if node was upgraded. Log: ${log}`));
 	// A runner that dies before writing its run record would otherwise vanish without a trace.
 	child.on("exit", (code) => {
 		if (code && !listRuns(dir).some((r) => r.pid === child.pid)) warn(`Background run failed to start (exit ${code}). Log: ${log}`);
