@@ -47,6 +47,13 @@ export function runLine(r: Run, o: WidgetInput, width = 76): string {
 	return clip(what && room >= 2 ? `${head} · ${clip(what, room)}` : head, width);
 }
 
+/** The footer: live runs of this session's project or folder, those elsewhere, and how many wait on the user. */
+export function statusText(here: number, elsewhere: number, waiting: number): string | undefined {
+	if (!here && !elsewhere) return undefined;
+	const n = elsewhere ? [here ? `${here} here` : "", `${elsewhere} elsewhere`].filter(Boolean).join(", ") : `${here} running`;
+	return `background: ${n}${waiting ? `, ${waiting} waiting` : ""}`;
+}
+
 /** Lines for the widget, or undefined when there is nothing to show. */
 export function widgetLines(runs: Run[], o: WidgetInput): string[] | undefined {
 	const shown = runs.filter((r) => live(r) || o.endedAt(r) > o.since);

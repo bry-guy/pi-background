@@ -7,7 +7,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir, getPackageDir, S
 import { acquire, holder, mine, release, waitFree } from "./lock.ts";
 import { type Ask, latestActivity, listRuns, type Run } from "./registry.ts";
 import { pruneChecks } from "./stall.ts";
-import { widgetLines } from "./widget.ts";
+import { statusText, widgetLines } from "./widget.ts";
 
 const RUNNER = fileURLToPath(new URL("./runner.ts", import.meta.url));
 const STATUS = "pi-background";
@@ -62,6 +62,15 @@ function spawnRunner(file: string, msg: string, cwd: string, warn: (text: string
 	});
 	child.unref();
 	return child.pid;
+}
+
+// A run belongs to its pi project (pi-projects, when installed), else to its folder. Its row, its question and its
+// end are shown only in sessions of the same scope; everywhere else it is a number in the footer.
+const scopes = new Map<string, string>();
+function scopeOf(cwd: string): string {
+	let s = scopes.get(cwd);
+	if (!s) scopes.set(cwd, (s = (globalThis as any)[Symbol.for("pi-projects.v1")]?.projectForCwd?.(cwd)?.path ?? cwd));
+	return s;
 }
 
 // pi re-runs the extension factory on every session switch, so state that must survive a switch lives here.
@@ -255,25 +264,32 @@ export default function (pi: ExtensionAPI) {
 		const runs = listRuns(runsDir());
 		const live = runs.filter((r) => r.status === "running" || r.status === "waiting");
 		const blocked = live.filter((r) => r.waiting?.length);
-		ui?.ui.setStatus(STATUS, live.length ? `background: ${live.length} running${blocked.length ? `, ${blocked.length} waiting on you` : ""}` : undefined);
+		const scope = ui && scopeOf(ui.cwd);
+		// Records from before `cwd` existed count as here.
+		const here = (r: Run) => !r.cwd || !scope || scopeOf(r.cwd) === scope;
+		const mine = live.filter(here).length;
+		ui?.ui.setStatus(STATUS, statusText(mine, live.length - mine, blocked.length));
 		for (const r of runs) {
 			const key = `${r.pid}:${r.startedAt}`;
 			if (r.status === "died" && !r.endedAt && !diedAt.has(key)) diedAt.set(key, primed ? Date.now() : 0);
 		}
-		ui?.ui.setWidget(RUNS, widgetLines(runs, { now: Date.now(), since: lastPrompt, endedAt, activity: latestActivity, width: process.stdout.columns }));
-		for (const r of blocked) {
+		ui?.ui.setWidget(RUNS, widgetLines(runs.filter(here), { now: Date.now(), since: lastPrompt, endedAt, activity: latestActivity, width: process.stdout.columns }));
+		for (const r of blocked.filter(here)) {
 			for (const a of r.waiting!) {
 				if (announced.has(a.id)) continue;
 				announced.add(a.id);
 				// Watching it already shows the question.
-				if (primed && watching?.file !== r.file) ui?.ui.notify(`"${r.name}" is waiting on you: ${a.title}\n/bg to answer here, or /resume it.`, "warning");
+				if (!primed || watching?.file === r.file) continue;
+				ui?.ui.notify(`"${r.name}" is waiting on you: ${a.title}\n/bg to answer here, or /resume it.`, "warning");
+				// The bell marks this terminal (tmux highlights the window). Never in RPC mode, where stdout is the protocol.
+				if (process.stdout.isTTY) process.stdout.write("\x07");
 			}
 		}
 		for (const r of runs) {
 			const key = `${r.pid}:${r.startedAt}`;
 			if (r.status === "running" || r.status === "waiting" || notified.has(key)) continue;
 			notified.add(key);
-			if (primed) ui?.ui.notify(`bg: ${r.name} ${r.status}${r.error ? `: ${r.error}` : ""}`, r.status === "done" ? "info" : "warning");
+			if (primed && here(r)) ui?.ui.notify(`bg: ${r.name} ${r.status}${r.error ? `: ${r.error}` : ""}`, r.status === "done" ? "info" : "warning");
 		}
 	};
 

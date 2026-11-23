@@ -9,6 +9,8 @@ export type Run = {
 	name: string;
 	msg: string;
 	log: string;
+	/** The session's folder; absent in records before this field. */
+	cwd?: string;
 	startedAt: string;
 	status: "waiting" | "running" | "done" | "error" | "stopped" | "stalled" | "died";
 	endedAt?: string;
