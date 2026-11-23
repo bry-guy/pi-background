@@ -8,7 +8,7 @@ import { createServer, type Socket } from "node:net";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acquire, release, waitFree } from "./lock.ts";
-import { activityTracker, type Ask, type Run, writeRun } from "./registry.ts";
+import { activityTracker, type Ask, latestActivity, nowDoing, type Run, writeRun } from "./registry.ts";
 import { heartbeat, STALL_MS, watchWithMonit } from "./stall.ts";
 
 const [pkgDir, file, msg, log] = process.argv.slice(2);
@@ -234,12 +234,13 @@ try {
 	let partial = "";
 	let tool: string | undefined;
 	let last: { stopReason?: string; errorMessage?: string } | undefined;
-	// RPC mode drops the child's setWorkingMessage (pi-summarize's live line), so "now" is the tool that started last.
+	// RPC mode drops the child's setWorkingMessage (pi-summarize's live line), so "now" is the session's newest
+	// pi-summarize line (written when the previous step ended) plus the tool that started last.
 	const setActivity = activityTracker(run, () => !finished && writeRun(dir, run));
 	listeners.add((e: any) => {
 		if (e.type === "tool_execution_start") {
 			toolsRunning.set(e.toolCallId, Date.now());
-			setActivity(`running ${e.toolName}`);
+			setActivity(nowDoing(latestActivity(run.file), e.toolName));
 		} else if (e.type === "tool_execution_end") toolsRunning.delete(e.toolCallId);
 		else if (e.type === "agent_end") setActivity(null);
 	});
