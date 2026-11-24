@@ -8,11 +8,27 @@ export type Holder = { pid: number; host: string; role: "tui" | "bg"; startedAt:
 
 export const lockPath = (file: string) => `${file}.lock`;
 
+/** This machine's names, the one locks are written under first. A Mac with no fixed HostName reports a name that
+ *  changes with the network ("Mac.home.arpa" at home, "mac.local" elsewhere), so a dead process's lock looked like
+ *  another machine's and was never cleared. Its Bonjour name stays put. */
+function hostNames(): string[] {
+	const now = hostname();
+	if (process.platform !== "darwin") return [now];
+	try {
+		const name = execFileSync("scutil", ["--get", "LocalHostName"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+		if (name) return [name, `${name}.local`, now]; // the last two: locks written before this fix
+	} catch {}
+	return [now];
+}
+
 // Read once: macOS can change os.hostname() mid-process, which would orphan our own lock.
-const HOST = hostname();
+const HOSTS = hostNames();
+
+/** True if a lock recorded under `host` was taken on this machine. */
+export const here = (host: string) => HOSTS.includes(host);
 
 /** True if `h` is this process's own lock. */
-export const mine = (h: Holder | undefined) => h?.pid === process.pid && h.host === HOST;
+export const mine = (h: Holder | undefined) => h?.pid === process.pid && here(h.host);
 
 /** Linux /proc/<pid>/cmdline names node/pi in argv[0]. Not comm: Node names its main thread "MainThread". */
 export const nodeCmdline = (cmdline: string) => /node|pi/i.test(basename(cmdline.split("\0")[0]!));
@@ -46,7 +62,7 @@ export function holder(file: string): Holder | undefined {
 		} catch {
 			return undefined;
 		}
-		if (h.host !== HOST || alive(h.pid)) return h;
+		if (!here(h.host) || alive(h.pid)) return h;
 		reclaim(file, raw);
 	}
 	return undefined;
@@ -92,7 +108,7 @@ export function reclaim(file: string, seen: string): void {
 
 /** Take the lock, or report who holds it. Re-acquiring a lock this process already holds succeeds. */
 export function acquire(file: string, role: Holder["role"]): { ok: true } | { ok: false; heldBy: Holder } {
-	const me: Holder = { pid: process.pid, host: HOST, role, startedAt: new Date().toISOString() };
+	const me: Holder = { pid: process.pid, host: HOSTS[0]!, role, startedAt: new Date().toISOString() };
 	const tmp = `${lockPath(file)}.${process.pid}`;
 	writeFileSync(tmp, JSON.stringify(me));
 	try {
