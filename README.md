@@ -24,7 +24,7 @@ Moving a turn mid-step restarts that step; the runner tells the model it was mov
 
 ## How it works
 
-- **Lock.** Every pi with this extension holds a lock (`<session>.jsonl.lock`, recording pid, host and role) on the session it has open. Pi core and pi-sync don't lock session files, so this is what stops two processes writing to one session.
+- **Lock.** Every pi with this extension holds a lock (`<session>.jsonl.lock`, recording pid, host and role) on the session it has open. Pi core and pi-sync don't lock session files, so this is what stops two processes writing to one session. A lock left by a process that died is cleared by the next pi on the same machine; on macOS the machine is known by its Bonjour name, because the hostname changes with the network.
 - **Runner.** Each background run is a detached `node src/runner.ts` process that drives `pi --mode rpc --session <file>` (the installed pi's own CLI). So the session loads exactly what your TUI loads (settings, extensions including pi's built-ins, packages, skills, AGENTS.md, enabledModels), and the runner uses only pi's public interfaces.
 - **One turn per run.** The runner runs a single turn (plus any messages queued while you watch), then saves and exits.
 - **Watching.** The runner streams events over `~/.pi/agent/background/<pid>.sock`; the TUI shows them under the transcript and reloads the session when the run ends. On SIGTERM it aborts the turn first, so the partial turn is saved.

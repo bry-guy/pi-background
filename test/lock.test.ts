@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -80,4 +80,14 @@ test("nodeCmdline: argv[0] of /proc/<pid>/cmdline names node or pi", () => {
 	assert.equal(nodeCmdline("pi\0--mode\0rpc\0"), true);
 	assert.equal(nodeCmdline("/usr/bin/bash\0-c\0node x\0"), false); // node only in a later arg
 	assert.equal(nodeCmdline(""), false);
+});
+
+test("a dead holder's lock under this Mac's other name is cleared", { skip: process.platform !== "darwin" && "macOS only" }, () => {
+	const f = session();
+	const name = execFileSync("scutil", ["--get", "LocalHostName"], { encoding: "utf8" }).trim();
+	writeFileSync(lockPath(f), JSON.stringify({ pid: 2 ** 22 - 1, host: `${name}.local`, role: "tui", startedAt: "" }));
+	assert.equal(holder(f), undefined);
+	assert.deepEqual(acquire(f, "tui"), { ok: true });
+	assert.equal(JSON.parse(readFileSync(lockPath(f), "utf8")).host, name);
+	release(f);
 });
