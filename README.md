@@ -5,6 +5,8 @@ Run pi sessions in the background on your machine, then pick them up with the no
 ## Install
 
 ```sh
+pi install npm:@bry-guy/pi-background
+# or from git:
 pi install git:github.com/bry-guy/pi-background
 ```
 
