@@ -5,7 +5,10 @@
   "type": "module",
   "keywords": ["pi-package", "pi", "background"],
   "license": "MIT",
-  "files": ["src", "README.md"],
+  "repository": { "type": "git", "url": "git+https://github.com/bry-guy/pi-background.git" },
+  "homepage": "https://github.com/bry-guy/pi-background#readme",
+  "bugs": { "url": "https://github.com/bry-guy/pi-background/issues" },
+  "files": ["src", "README.md", "LICENSE"],
   "pi": {
     "extensions": ["./src/extension.ts"]
   },
