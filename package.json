@@ -13,7 +13,7 @@
     "extensions": ["./src/extension.ts"]
   },
   "scripts": {
-    "test": "node --test test/*.test.ts"
+    "test": "node --test --test-concurrency=1 test/*.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
