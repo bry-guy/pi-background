@@ -49,6 +49,9 @@ once it's 10 minutes old, SIGKILL at 13. monit runs as your own daemon with its 
 - `start({ cwd, msg, env, name })` creates a new session in `cwd` (named `name`, if given), runs `msg` in it in the
   background with extra `env`, and returns `{ file, pid }`. pi-projects' `role_agent` uses it with `PI_ROLE`.
   The new session starts with the calling session's model and thinking level, not the configured defaults.
+- `send({ file, msg, env })` runs `msg` as the next turn of an existing session file, in the background with extra
+  `env`, and returns `{ file, pid }`. The session keeps its folder and model. `role_agent` uses it for follow-ups,
+  with the same `PI_ROLE`. Check `runs()` first: a run still writing that session makes the new one wait and give up.
 - `runs()` lists runs (`Run` in `src/registry.ts`).
 - `stop(pid)` stops a live run like `/bg stop`; returns false when no live run has that pid.
 
