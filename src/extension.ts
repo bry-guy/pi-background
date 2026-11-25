@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -140,12 +140,30 @@ export function newSessionFile(cwd: string, name?: string, sessionDir?: string):
 	return file;
 }
 
-/** For other extensions (pi-projects' role_agent): start a new session in the background. */
+/** The folder a session file's header names; throws for a file that is not a session. */
+export function sessionCwd(file: string): string {
+	let head: any;
+	try {
+		head = JSON.parse(readFileSync(file, "utf8").split("\n", 1)[0]!);
+	} catch {}
+	if (head?.type !== "session" || typeof head.cwd !== "string") throw new Error(`${file} is not a pi session file`);
+	return head.cwd;
+}
+
+/** For other extensions (pi-projects' role_agent): start a new session in the background, and send it more later. */
 (globalThis as any)[Symbol.for("pi-background.v1")] = {
 	/** Creates a session in cwd, runs msg in it detached, and returns its file and runner pid. It gets the calling session's model and thinking level. */
 	start({ cwd, msg, env, name }: { cwd: string; msg: string; env?: Record<string, string>; name?: string }) {
 		const file = newSessionFile(cwd, name);
 		return { file, pid: spawnRunner(file, msg, cwd, warn, env, liveModel()) };
+	},
+	/**
+	 * Runs msg as the next turn of an existing session file, detached, with the same extra env start() takes. The
+	 * session keeps its own folder and model. The caller checks runs() first: a runner started while another still
+	 * writes the session waits two minutes for it, then gives up.
+	 */
+	send({ file, msg, env }: { file: string; msg: string; env?: Record<string, string> }) {
+		return { file, pid: spawnRunner(file, msg, sessionCwd(file), warn, env) };
 	},
 	runs: () => listRuns(runsDir()),
 	/** Stops a live run like /bg stop (SIGTERM; it ends as "stopped"). False when no live run has this pid. */
